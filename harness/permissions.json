@@ -1,0 +1,42 @@
+{
+  "allow": [
+    "Bash(pytest*)",
+    "Bash(ruff*)",
+    "Bash(git status*)",
+    "Bash(git add*)",
+    "Bash(git commit*)",
+    "Bash(git branch*)",
+    "Bash(git checkout*)",
+    "Bash(git log*)",
+    "Bash(git diff*)",
+    "Bash(python*)",
+    "Bash(make*)",
+    "Read(src/**)",
+    "Edit(src/**)"
+  ],
+  "ask": [
+    "Bash(git push*)",
+    "Bash(git reset --hard*)",
+    "Bash(git clean -f*)",
+    "Bash(pip install*)",
+    "Bash(npm install*)",
+    "Bash(curl*)",
+    "Bash(wget*)",
+    "vercel_deploy",
+    "render_deploy",
+    "mcp__github__*"
+  ],
+  "deny": [
+    "Read(.env)",
+    "Read(secrets/**)",
+    "Bash(rm -rf /*)",
+    "Bash(rm -rf *)",
+    "Bash(*rm -rf*)",
+    "Bash(*:(){ :|:& };:*)",
+    "Bash(*mkfs*)",
+    "Bash(*dd if=*)",
+    "Bash(*format c:*)",
+    "Bash(*shutdown*)",
+    "Bash(*reboot*)"
+  ]
+}
