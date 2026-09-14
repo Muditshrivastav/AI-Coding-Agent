@@ -27,7 +27,7 @@ from tools.verification_tools import VerificationToolset, create_verification_to
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-from agent.harness import HarnessGuard
+from agent.guardrail import HarnessGuard
 from langgraph.types import interrupt
 
 class ShellCommandArgs(BaseModel):

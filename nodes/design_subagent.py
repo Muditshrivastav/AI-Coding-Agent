@@ -16,7 +16,7 @@ from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
 from langgraph.types import interrupt
 
-from agent.harness import HarnessGuard
+from agent.guardrail import HarnessGuard
 from frameworks.mcp_client import DrawioMCPClient, drawio_mcp_client
 
 DESIGN_SYSTEM_PROMPT = """You are the design-agent for an autonomous coding harness.

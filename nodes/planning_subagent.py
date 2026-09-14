@@ -16,7 +16,7 @@ from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
 from langgraph.types import interrupt
 
-from agent.harness import HarnessGuard
+from agent.guardrail import HarnessGuard
 
 
 PLANNING_SYSTEM_PROMPT = """You are the planning-agent for an autonomous coding harness.

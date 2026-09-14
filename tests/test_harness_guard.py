@@ -2,7 +2,7 @@
 tests/test_harness_guard.py - Unit tests for permissions.json guardrails.
 """
 
-from agent.harness import HarnessGuard
+from agent.guardrail import HarnessGuard
 
 
 def test_harness_guard_allow_rules():

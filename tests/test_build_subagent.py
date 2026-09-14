@@ -62,7 +62,7 @@ async def test_get_build_dev_tools():
 def test_execute_command_hitl_guardrail():
     from nodes.build_subagent import create_shell_tool
     from deepagents.backends import LocalShellBackend
-    from agent.harness import HarnessGuard
+    from agent.guardrail import HarnessGuard
 
     mock_backend = MagicMock(spec=LocalShellBackend)
     mock_backend.execute.return_value = MagicMock(exit_code=0, output="git version 2.40.0")

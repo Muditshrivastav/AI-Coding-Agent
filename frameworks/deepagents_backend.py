@@ -2,7 +2,7 @@ import os
 from typing import Any
 from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
-from agent.harness import HarnessGuard
+from agent.guardrail import HarnessGuard
 
 
 class GuardedShellBackend:

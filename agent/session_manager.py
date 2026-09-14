@@ -43,7 +43,10 @@ class SessionManager:
         self._storage_dir.mkdir(parents=True, exist_ok=True)
         self._registry_path = self._storage_dir / "sessions.json"
         self._sessions: dict[str, SessionMetadata] = {}
-        self._load()
+        if not self._registry_path.exists():
+            self._save()
+        else:
+            self._load()
 
     def _load(self) -> None:
         if not self._registry_path.exists():

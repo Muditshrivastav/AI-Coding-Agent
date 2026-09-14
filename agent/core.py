@@ -9,7 +9,7 @@ from frameworks.langgraph_runtime import LangGraphRuntime
 from frameworks.external_tools import ExternalToolsManager
 from tools.deploy_tools import DeployToolset
 from tools.verification_tools import VerificationToolset
-from agent.harness import HarnessGuard
+from agent.guardrail import HarnessGuard
 from agent.state import AgentState, create_initial_state
 from agent.session_manager import SessionManager, SessionMetadata
 from nodes.planning_subagent import planning_subagent
