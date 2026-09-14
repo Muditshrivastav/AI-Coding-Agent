@@ -22,3 +22,14 @@ def test_agent_state_keys():
     assert state["current_stage"] == "planning"
     assert state["verify_passed"] is True
     assert len(state["todos"]) == 1
+
+
+def test_create_initial_state():
+    from agent.state import create_initial_state
+    init_state = create_initial_state("Implement feature X")
+    assert init_state["user_request"] == "Implement feature X"
+    assert init_state["current_stage"] == "planning"
+    assert init_state["verify_passed"] is False
+    assert init_state["verify_attempts"] == 0
+    assert len(init_state["messages"]) == 1
+    assert init_state["messages"][0]["content"] == "Implement feature X"

@@ -12,7 +12,9 @@
     "Bash(python*)",
     "Bash(make*)",
     "Read(src/**)",
-    "Edit(src/**)"
+    "Edit(src/**)",
+    "tavily_search*",
+    "chrome-devtools*"
   ],
   "ask": [
     "Bash(git push*)",
@@ -24,7 +26,9 @@
     "Bash(wget*)",
     "vercel_deploy",
     "render_deploy",
-    "mcp__github__*"
+    "mcp__github__*",
+    "Edit(plan.md)",
+    "Edit(ARCHITECTURE.md)"
   ],
   "deny": [
     "Read(.env)",

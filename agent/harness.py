@@ -110,10 +110,30 @@ class HarnessGuard:
         try:
             mtime = self._path.stat().st_mtime
             data = json.loads(self._path.read_text(encoding="utf-8"))
-            self._permissions = data
+
+            # Schema guard: the file must be a dict whose values are lists of strings.
+            # A malformed file (e.g. "allow": "Bash(*)" instead of ["Bash(*)"])
+            # would silently iterate over characters and match nothing, effectively
+            # failing open.  Reject anything that doesn't pass this check.
+            if not isinstance(data, dict):
+                raise ValueError("permissions.json must be a JSON object at the top level.")
+            validated: dict[str, list[str]] = {"allow": [], "ask": [], "deny": []}
+            for key in ("allow", "ask", "deny"):
+                raw = data.get(key, [])
+                if not isinstance(raw, list):
+                    raise ValueError(
+                        f"permissions.json: '{key}' must be a list, got {type(raw).__name__}."
+                    )
+                if not all(isinstance(p, str) for p in raw):
+                    raise ValueError(
+                        f"permissions.json: all entries in '{key}' must be strings."
+                    )
+                validated[key] = raw
+
+            self._permissions = validated
             self._mtime = mtime
         except Exception:
-            pass  # Keep previous rules if the file is temporarily malformed
+            pass  # Keep previous rules if the file is temporarily malformed or mid-write
 
     def _reload_if_changed(self) -> None:
         """Hot-reload permissions.json if the file has been modified since last load."""
@@ -139,8 +159,22 @@ class HarnessGuard:
 
             Bash(git push*)   matches  Bash(git push origin main)
             mcp__github__*    matches  mcp__github__create_pull_request
+
+        The signature is whitespace-normalised before matching so that padded
+        or multi-space variants like ``Bash(   rm  -rf  /)`` cannot bypass a
+        deny rule written as ``Bash(*rm -rf*)``.  Internal whitespace is
+        collapsed to a single space; leading/trailing space is stripped.
+
+        ``permissions.json`` is read from disk on **every call** (via ``load()``)
+        so that rule changes are always reflected immediately — no mtime cache,
+        no clock-skew window, no stale-rule risk between two writes on the
+        same filesystem timestamp.
         """
-        self._reload_if_changed()
+        self.load()  # Always read fresh from disk — security over cache speed
+
+        # Normalise: collapse internal whitespace so crafted padding can't
+        # slip past a deny pattern (e.g. "Bash(  rm  -rf /)" → "Bash(rm -rf /)").
+        action_signature = " ".join(action_signature.split())
 
         for pattern in self._permissions.get("deny", []):
             if fnmatch(action_signature, pattern):
@@ -163,7 +197,7 @@ class HarnessGuard:
     def enforce(
         self,
         action_signature: str,
-        interrupt_fn: Callable[[Any], Any],
+        interrupt_fn: Callable[[Any], Any] | None = None,
         *,
         description: str | None = None,
         extra_context: dict[str, Any] | None = None,
@@ -175,6 +209,7 @@ class HarnessGuard:
                               e.g. ``"Bash(git push origin main)"``.
             interrupt_fn:     The LangGraph ``interrupt`` callable (or any
                               callable that blocks until the human responds).
+                              If omitted (None), defaults to ``langgraph.types.interrupt``.
             description:      Human-readable explanation shown in the approval
                               prompt. Defaults to the signature.
             extra_context:    Additional key-value pairs included in the
@@ -183,6 +218,7 @@ class HarnessGuard:
         Raises:
             PermissionError:  Gate 1 — action is in the deny list.
             PermissionError:  Gate 2 — action required approval and was rejected.
+            ValueError:       Gate 2 — approval required but no interrupt_fn provided and LangGraph unavailable.
 
         Returns:
             None on success (action is approved / unconditionally allowed).
@@ -196,6 +232,7 @@ class HarnessGuard:
                 f"🛑 [SECURITY DENIED] '{action_signature}' is blocked by harness "
                 f"guardrails (deny rule in permissions.json). Execution aborted."
             )
+            
             _append_failure(
                 self._failures_path,
                 stage="guardrail",
@@ -207,6 +244,17 @@ class HarnessGuard:
 
         # ── Gate 2: Human-in-the-Loop ────────────────────────────────────
         if permission == "ask":
+            fn = interrupt_fn
+            if fn is None:
+                try:
+                    from langgraph.types import interrupt as _lg_interrupt
+                    fn = _lg_interrupt
+                except ImportError:
+                    raise ValueError(
+                        "Action requires human approval ('ask'), but no interrupt_fn was provided "
+                        "and langgraph.types.interrupt could not be imported."
+                    )
+
             payload: dict[str, Any] = {
                 "action": "hitl_approval_required",
                 "signature": action_signature,
@@ -216,7 +264,7 @@ class HarnessGuard:
             if extra_context:
                 payload.update(extra_context)
 
-            approval = interrupt_fn(payload)
+            approval = fn(payload)
 
             # Normalise various response shapes: bool, dict, str
             is_approved: bool = False
@@ -277,3 +325,65 @@ class HarnessGuard:
             description=description,
             resolution=resolution,
         )
+
+    # ------------------------------------------------------------------
+    # Tool wrapping — apply guard to any LangChain StructuredTool
+    # ------------------------------------------------------------------
+
+    def wrap_tool_with_guard(
+        self,
+        tool: Any,
+        interrupt_fn: Callable[[Any], Any] | None = None,
+    ) -> Any:
+        """Wrap a LangChain StructuredTool so guard.enforce() fires before its func.
+
+        The action signature used for permission matching is ``tool.name``, e.g.
+        ``mcp__github__create_pull_request`` — matching patterns like
+        ``"mcp__github__*"`` already present in permissions.json.
+
+        If the tool does not expose a ``.func`` attribute (e.g. it is an
+        :class:`langchain_core.tools.BaseTool` subclass with a custom
+        ``_run`` method) the original tool is returned unchanged so the caller
+        can still use it — just without the enforce gate.
+
+        Args:
+            tool:         Any LangChain BaseTool / StructuredTool instance.
+            interrupt_fn: The LangGraph ``interrupt`` callable (or any callable
+                          that blocks until the human responds). If None, defaults
+                          to ``langgraph.types.interrupt``.
+
+        Returns:
+            A new StructuredTool with an identical schema and description but
+            with a guarded wrapper around the original func.
+        """
+        import functools
+
+        try:
+            from langchain_core.tools import StructuredTool as _ST
+        except ImportError:
+            return tool  # langchain_core not installed — pass through
+
+        original_func: Callable[..., Any] | None = getattr(tool, "func", None)
+        if original_func is None:
+            return tool  # Not a StructuredTool with .func — return as-is
+
+        tool_name: str = getattr(tool, "name", "unknown_tool")
+        tool_desc: str = getattr(tool, "description", "")
+        tool_schema: Any = getattr(tool, "args_schema", None)
+
+        guard_self = self  # capture for closure
+
+        @functools.wraps(original_func)
+        def _guarded(*args: Any, **kwargs: Any) -> Any:
+            guard_self.enforce(tool_name, interrupt_fn=interrupt_fn)
+            return original_func(*args, **kwargs)
+
+        wrapped_kwargs: dict[str, Any] = {
+            "func": _guarded,
+            "name": tool_name,
+            "description": f"[HITL-guarded] {tool_desc}",
+        }
+        if tool_schema is not None:
+            wrapped_kwargs["args_schema"] = tool_schema
+
+        return _ST.from_function(**wrapped_kwargs)

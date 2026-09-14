@@ -15,6 +15,11 @@ app = FastAPI(title="Coding Agent Harness API", version="0.1.0")
 harness: CodingAgentHarness | None = None
 
 
+class CreateSessionRequest(BaseModel):
+    title: str | None = None
+    session_id: str | None = None
+
+
 class RunRequest(BaseModel):
     user_request: str
     thread_id: str | None = None
@@ -33,6 +38,60 @@ async def startup_event() -> None:
 @app.get("/health")
 async def health_check() -> dict[str, str]:
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Multi-Session Management (Codex / Antigravity style)
+# ---------------------------------------------------------------------------
+
+@app.get("/sessions")
+async def list_sessions() -> list[dict[str, Any]]:
+    """List all chat sessions with their metadata, ordered newest first."""
+    global harness
+    if harness is None:
+        raise HTTPException(status_code=500, detail="Harness not initialized.")
+
+    from dataclasses import asdict
+    return [asdict(s) for s in harness.sessions.list_sessions()]
+
+
+@app.post("/sessions")
+async def create_session(req: CreateSessionRequest) -> dict[str, Any]:
+    """Create a new dedicated chat session thread."""
+    global harness
+    if harness is None:
+        raise HTTPException(status_code=500, detail="Harness not initialized.")
+
+    from dataclasses import asdict
+    session = harness.sessions.create_session(title=req.title, session_id=req.session_id)
+    return asdict(session)
+
+
+@app.get("/sessions/{thread_id}")
+async def get_session_details(thread_id: str) -> dict[str, Any]:
+    """Retrieve metadata and checkpointed state/messages for a session."""
+    global harness
+    if harness is None:
+        raise HTTPException(status_code=500, detail="Harness not initialized.")
+
+    from dataclasses import asdict
+    meta = harness.sessions.get_session(thread_id)
+    state = await harness.get_state(thread_id)
+    return {
+        "session": asdict(meta) if meta else None,
+        "state": state,
+    }
+
+
+@app.delete("/sessions/{thread_id}")
+async def delete_session(thread_id: str) -> dict[str, Any]:
+    """Delete a chat session."""
+    global harness
+    if harness is None:
+        raise HTTPException(status_code=500, detail="Harness not initialized.")
+
+    deleted = harness.sessions.delete_session(thread_id)
+    return {"thread_id": thread_id, "deleted": deleted}
 
 
 @app.post("/runs")

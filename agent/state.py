@@ -7,7 +7,7 @@ from typing import TypedDict, Literal, Annotated, Any
 from langgraph.graph.message import add_messages
 
 
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     user_request: str
     plan_md: str
     architecture_md: str
@@ -19,3 +19,20 @@ class AgentState(TypedDict):
     verify_passed: bool
     messages: Annotated[list[Any], add_messages]
     current_stage: Literal["planning", "design", "build", "verify", "done"]
+
+
+def create_initial_state(user_request: str) -> AgentState:
+    """Creates a fully initialized AgentState dictionary for a new run."""
+    return {
+        "user_request": user_request,
+        "plan_md": "",
+        "architecture_md": "",
+        "retrieved_context": [],
+        "generated_files": [],
+        "approved_files": [],
+        "todos": [],
+        "verify_attempts": 0,
+        "verify_passed": False,
+        "messages": [{"role": "user", "content": user_request}],
+        "current_stage": "planning",
+    }

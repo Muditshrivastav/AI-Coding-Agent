@@ -104,13 +104,18 @@ async def get_build_dev_tools(
     """Gathers and resolves all tools for the build subagent:
 
     1. Base / deployment tools (DeployToolset)
-    2. External tools (Tavily search, GitHub MCP, Chrome DevTools MCP)
+    2. External tools (Tavily search, GitHub MCP, Chrome DevTools MCP) — each
+       wrapped through HarnessGuard so permissions.json is enforced before
+       any external tool call.
     3. Dedicated MCP clients (Render MCP, Draw.io MCP, custom MCPClientWrappers)
 
     Returns:
         (tools_list, external_tools_manager, active_mcp_clients)
     """
     tools: list[Any] = list(base_tools or [])
+
+    # Shared guard instance for this tool-set build.
+    harness_guard = HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
 
     # 1. Base Deployment Tools
     if include_deploy and not any(getattr(t, "name", "") == "deploy_to_render" for t in tools):
@@ -126,11 +131,13 @@ async def get_build_dev_tools(
         ext_tools = await ext_mgr.get_tools(include_mcp=True, include_search=True)
         for t in ext_tools:
             if t not in tools:
-                tools.append(t)
+                # Wrap every external / MCP tool through the HITL guard so that
+                # patterns like "mcp__github__*" in permissions.json are enforced.
+                tools.append(harness_guard.wrap_tool_with_guard(t, interrupt_fn=interrupt))
     except Exception:
         # Fallback to search tool if MCP connections are offline
         if ext_mgr._tavily_tool and ext_mgr._tavily_tool not in tools:
-            tools.append(ext_mgr._tavily_tool)
+            tools.append(harness_guard.wrap_tool_with_guard(ext_mgr._tavily_tool, interrupt_fn=interrupt))
 
     # 3. Dedicated MCP clients
     clients = list(mcp_clients or [])
@@ -142,23 +149,22 @@ async def get_build_dev_tools(
             mcp_tools = await client.get_tools()
             for t in mcp_tools:
                 if t not in tools:
-                    tools.append(t)
+                    tools.append(harness_guard.wrap_tool_with_guard(t, interrupt_fn=interrupt))
         except Exception:
             pass
 
-    # 4. Programmatic Self-Verification Tool
+    # 4. Programmatic Self-Verification Tool — wired with interrupt for real HITL escalation
     if not any(getattr(t, "name", "") == "run_verification" for t in tools):
         try:
-            tools.append(create_verification_tool(root_dir=root_dir))
+            tools.append(create_verification_tool(root_dir=root_dir, interrupt_fn=interrupt))
         except Exception:
             pass
 
     # 5. LocalShellBackend Terminal & Shell Execution Tool (with HITL Guardrail Layer)
     if not any(getattr(t, "name", "") == "execute_command" for t in tools):
-        try:
-            tools.append(create_shell_tool(LocalShellBackend(root_dir=root_dir), root_dir=root_dir))
-        except Exception:
-            pass
+        # Hard failure here: if the guarded shell tool cannot be created the build
+        # subagent must not run without it, as unguarded shell access would be unsafe.
+        tools.append(create_shell_tool(LocalShellBackend(root_dir=root_dir), root_dir=root_dir))
 
     return tools, ext_mgr, clients
 
@@ -212,31 +218,37 @@ def build_dev_subagent(
     external_tools: ExternalToolsManager | None = None,
     mcp_clients: list[MCPClientWrapper] | None = None,
     root_dir: str = ".",
+    backend: LocalShellBackend | None = None,
+    guard: HarnessGuard | None = None,
 ) -> dict[str, Any]:
     """Constructs the build subagent specification with assigned tools,
 
     integrating LocalShellBackend execution, ExternalToolsManager, and MCP clients.
+    All external / MCP tools are wrapped through HarnessGuard so that
+    permissions.json is enforced before any external tool call.
     """
     tools = list(all_tools or [])
 
-    ext_mgr = external_tools or ExternalToolsManager()
-    # Immediately wire synchronous external tools (like Tavily search)
-    if ext_mgr._tavily_tool and ext_mgr._tavily_tool not in tools:
-        tools.append(ext_mgr._tavily_tool)
+    # Shared guard for this subagent build.
+    harness_guard = guard or HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
+    shell_backend = backend or LocalShellBackend(root_dir=root_dir)
 
-    # Immediately wire self-verification tool
+    ext_mgr = external_tools or ExternalToolsManager()
+    # Immediately wire synchronous external tools (like Tavily search) — guarded.
+    if ext_mgr._tavily_tool and ext_mgr._tavily_tool not in tools:
+        tools.append(harness_guard.wrap_tool_with_guard(ext_mgr._tavily_tool, interrupt_fn=interrupt))
+
+    # Immediately wire self-verification tool with real HITL escalation
     if not any(getattr(t, "name", "") == "run_verification" for t in tools):
         try:
-            tools.append(create_verification_tool(root_dir=root_dir))
+            tools.append(create_verification_tool(root_dir=root_dir, interrupt_fn=interrupt))
         except Exception:
             pass
 
-    # 5. LocalShellBackend Terminal & Shell Execution Tool (with HITL Guardrail Layer)
+    # LocalShellBackend Terminal & Shell Execution Tool (with HITL Guardrail Layer)
+    # Hard failure: the build subagent must not run without a guarded shell tool.
     if not any(getattr(t, "name", "") == "execute_command" for t in tools):
-        try:
-            tools.append(create_shell_tool(LocalShellBackend(root_dir=root_dir), root_dir=root_dir))
-        except Exception:
-            pass
+        tools.append(create_shell_tool(shell_backend, guard=harness_guard, root_dir=root_dir))
 
     return {
         "name": "build-agent",

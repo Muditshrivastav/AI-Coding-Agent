@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import os
 import shutil
 import subprocess
-from typing import Any
+from typing import Any, Callable
 from pydantic import BaseModel, Field
 from langchain_core.tools import StructuredTool
 
@@ -33,12 +33,16 @@ class VerificationToolset:
         root_dir: str = ".",
         max_attempts: int = 3,
         failures_path: str | None = None,
+        interrupt_fn: Callable[[Any], Any] | None = None,
     ) -> None:
         self._root_dir = root_dir
         self._max_attempts = max_attempts
         self._failures_path = failures_path or os.path.join(root_dir, "harness", "failures.md")
         self._attempt_count: int = 0
         self._last_passed: bool = False
+        # Optional LangGraph interrupt callable — when set, a real HITL checkpoint
+        # is created after max_attempts consecutive failures instead of a text warning.
+        self._interrupt_fn: Callable[[Any], Any] | None = interrupt_fn
 
     @property
     def attempt_count(self) -> int:
@@ -209,6 +213,18 @@ class VerificationToolset:
                 f"\n\n⚠️ ESCALATION WARNING: Verification has failed {self._attempt_count} times in a row. "
                 "Capped retry limit reached. Escalate to Human-in-the-Loop (HITL) if error cannot be resolved."
             )
+            # Trigger a real LangGraph HITL checkpoint if an interrupt function is wired.
+            if self._interrupt_fn is not None:
+                self._interrupt_fn({
+                    "action": "verification_escalation",
+                    "attempts": self._attempt_count,
+                    "max_attempts": self._max_attempts,
+                    "last_failure": failed_summary,
+                    "message": (
+                        f"Verification has failed {self._attempt_count} consecutive times. "
+                        "Approve to allow the agent to continue retrying, or reject to abort."
+                    ),
+                })
 
         report = (
             f"❌ Verification FAILED (tier: {tier}, attempt: {self._attempt_count}/{self._max_attempts}).\n"
@@ -235,8 +251,24 @@ class VerificationToolset:
         ]
 
 
-def create_verification_tool(root_dir: str = ".", failures_path: str | None = None) -> StructuredTool:
-    """Convenience factory returning the run_verification tool."""
-    toolset = VerificationToolset(root_dir=root_dir, failures_path=failures_path)
+def create_verification_tool(
+    root_dir: str = ".",
+    failures_path: str | None = None,
+    interrupt_fn: Callable[[Any], Any] | None = None,
+) -> StructuredTool:
+    """Convenience factory returning the run_verification tool.
+
+    Args:
+        root_dir:     Workspace root used to locate harness/failures.md.
+        failures_path: Override for the failures log path.
+        interrupt_fn: Optional LangGraph ``interrupt`` callable. When provided,
+                      a real HITL checkpoint is raised after ``max_attempts``
+                      consecutive failures instead of only printing a warning.
+    """
+    toolset = VerificationToolset(
+        root_dir=root_dir,
+        failures_path=failures_path,
+        interrupt_fn=interrupt_fn,
+    )
     return toolset.get_tools()[0]
 

@@ -4,7 +4,7 @@ frameworks/langsmith_tracer.py - LangSmith observability and tracing integration
 
 import os
 from typing import Any
-from langsmith import Client
+from langsmith import Client, evaluate, traceable
 
 
 class LangSmithTracer:
