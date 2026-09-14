@@ -14,6 +14,8 @@ class LangSmithTracer:
         self._project_name = project_name or os.getenv("LANGCHAIN_PROJECT", "coding-agent-harness")
         self._client = Client()
 
+
+
     @property
     def project_name(self) -> str:
         return self._project_name
