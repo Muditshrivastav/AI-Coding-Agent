@@ -69,8 +69,12 @@ class MCPClientWrapper:
         await self._session.initialize()
 
     async def close(self) -> None:
-        await self._stack.aclose()
         self._session = None
+        try:
+            await self._stack.aclose()
+        except BaseException:
+            # Suppress AnyIO cancel scope / task group exit mismatch or process termination errors on teardown
+            pass
 
     def _make_tool(self, mcp_tool: Any) -> StructuredTool:
         schema = getattr(mcp_tool, "inputSchema", None) or {"type": "object", "properties": {}}
