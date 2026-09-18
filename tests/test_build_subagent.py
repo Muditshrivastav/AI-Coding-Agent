@@ -160,6 +160,9 @@ def test_real_mcp_server_integration(tmp_path):
             assert any(t.name == "add_numbers" for t in tools)
             assert real_client in returned_clients
         finally:
-            await real_client.close()
+            try:
+                await real_client.close()
+            except Exception:
+                pass
 
     asyncio.run(_test())

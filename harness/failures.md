@@ -24,8 +24,21 @@
 | 2026-09-17 12:56 UTC | guardrail | security-deny | Build agent requests: rm -rf / | Blocked by deny rule — no execution. |
 | 2026-09-17 12:56 UTC | hitl | human-rejected | Build agent requests: git push origin main | Rejected by operator via HITL interrupt. |
 | 2026-09-17 12:59 UTC | guardrail | security-deny | Build agent requests: rm -rf / | Blocked by deny rule — no execution. |
+
 | 2026-09-17 12:59 UTC | hitl | human-rejected | Build agent requests: git push origin main | Rejected by operator via HITL interrupt. |
 | 2026-09-17 13:01 UTC | guardrail | security-deny | Build agent requests: rm -rf / | Blocked by deny rule — no execution. |
 | 2026-09-17 13:01 UTC | hitl | human-rejected | Build agent requests: git push origin main | Rejected by operator via HITL interrupt. |
 | 2026-09-17 13:04 UTC | guardrail | security-deny | Build agent requests: rm -rf / | Blocked by deny rule — no execution. |
 | 2026-09-17 13:04 UTC | hitl | human-rejected | Build agent requests: git push origin main | Rejected by operator via HITL interrupt. |
+| 2026-09-18 05:39 UTC | guardrail | security-deny | Build agent requests: rm -rf / | Blocked by deny rule — no execution. |
+| 2026-09-18 05:39 UTC | hitl | human-rejected | Build agent requests: git push origin main | Rejected by operator via HITL interrupt. |
+| 2026-09-18 05:46 UTC | guardrail | security-deny | Build agent requests: rm -rf / | Blocked by deny rule — no execution. |
+| 2026-09-18 05:46 UTC | hitl | human-rejected | Build agent requests: git push origin main | Rejected by operator via HITL interrupt. |
+| 2026-09-18 05:49 UTC | guardrail | security-deny | Build agent requests: rm -rf / | Blocked by deny rule — no execution. |
+| 2026-09-18 05:49 UTC | hitl | human-rejected | Build agent requests: git push origin main | Rejected by operator via HITL interrupt. |
+| 2026-09-18 05:50 UTC | guardrail | security-deny | Build agent requests: rm -rf / | Blocked by deny rule — no execution. |
+| 2026-09-18 05:50 UTC | hitl | human-rejected | Build agent requests: git push origin main | Rejected by operator via HITL interrupt. |
+| 2026-09-18 07:12 UTC | guardrail | security-deny | Build agent requests: rm -rf / | Blocked by deny rule — no execution. |
+| 2026-09-18 07:12 UTC | hitl | human-rejected | Build agent requests: git push origin main | Rejected by operator via HITL interrupt. |
+| 2026-09-18 07:20 UTC | guardrail | security-deny | Build agent requests: rm -rf / | Blocked by deny rule — no execution. |
+| 2026-09-18 07:20 UTC | hitl | human-rejected | Build agent requests: git push origin main | Rejected by operator via HITL interrupt. |

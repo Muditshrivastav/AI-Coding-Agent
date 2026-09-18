@@ -10,7 +10,7 @@ from typing import Any
 import os
 
 from deepagents import create_deep_agent
-from deepagents.backends import FileSystemBackend
+from deepagents.backends import FilesystemBackend
 from langchain_core.tools import StructuredTool
 from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
@@ -41,7 +41,7 @@ async def make_design_subagent(
 
     What happens inside:
       1. ``ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)`` is used as the LLM.
-      2. ``FileSystemBackend(root_dir)`` lets the agent read files from disk.
+      2. ``FilesystemBackend(root_dir)`` lets the agent read files from disk.
       3. A HarnessGuard-protected ``write_architecture`` tool gates every write to
          ARCHITECTURE.md through permissions.json before touching disk.
       4. ``DrawioMCPClient`` POSTs the MCP initialize request to https://mcp.draw.io/mcp,
@@ -90,7 +90,7 @@ async def make_design_subagent(
     )
 
     llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
-    backend = FileSystemBackend(root_dir=root_dir)
+    backend = FilesystemBackend(root_dir=root_dir)
 
     drawio: DrawioMCPClient = drawio_mcp_client()
     drawio_tools = await drawio.get_tools()  # POSTs initialize, then list_tools

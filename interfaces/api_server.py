@@ -44,6 +44,8 @@ async def health_check() -> dict[str, str]:
 # Multi-Session Management (Codex / Antigravity style)
 # ---------------------------------------------------------------------------
 
+
+
 @app.get("/sessions")
 async def list_sessions() -> list[dict[str, Any]]:
     """List all chat sessions with their metadata, ordered newest first."""
@@ -64,6 +66,7 @@ async def create_session(req: CreateSessionRequest) -> dict[str, Any]:
 
     from dataclasses import asdict
     session = harness.sessions.create_session(title=req.title, session_id=req.session_id)
+    await harness.runtime.persist_session_to_memory(session.id)
     return asdict(session)
 
 

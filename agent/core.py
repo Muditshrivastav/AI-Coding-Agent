@@ -58,8 +58,8 @@ class CodingAgentHarness:
 
         self._guard = HarnessGuard(f"{root_dir}/harness/permissions.json")
         self._backend = DeepAgentsBackend(root_dir=root_dir, guard=self._guard)
-        self._runtime = LangGraphRuntime()
         self._sessions = SessionManager(root_dir=root_dir)
+        self._runtime = LangGraphRuntime(session_manager=self._sessions, root_dir=root_dir)
         self._external_tools = ExternalToolsManager()
         self._deploy_tools = DeployToolset(root_dir=root_dir)
         self._verification_tools = VerificationToolset(root_dir=root_dir)
@@ -104,6 +104,10 @@ class CodingAgentHarness:
     @property
     def sessions(self) -> SessionManager:
         return self._sessions
+
+    @property
+    def runtime(self) -> LangGraphRuntime:
+        return self._runtime
 
     # ------------------------------------------------------------------
     # Input sanitization
@@ -166,6 +170,7 @@ class CodingAgentHarness:
             input_payload = create_initial_state(user_request)
 
         self._sessions.update_session(thread_id, increment_messages=True, status="active")
+        await self._runtime.persist_session_to_memory(thread_id)
 
         result = await self._agent.ainvoke(
             input_payload,
@@ -174,9 +179,11 @@ class CodingAgentHarness:
 
         if isinstance(result, dict) and result.get("__interrupt__"):
             self._sessions.update_session(thread_id, status="awaiting_approval")
+            await self._runtime.persist_session_to_memory(thread_id)
             return {"status": "awaiting_approval", "interrupt": result["__interrupt__"]}
 
         self._sessions.update_session(thread_id, status="active")
+        await self._runtime.persist_session_to_memory(thread_id)
         return {"status": "complete", "result": result}
 
     async def resume(self, thread_id: str, approved: bool) -> dict[str, Any]:
@@ -188,9 +195,11 @@ class CodingAgentHarness:
         )
         if isinstance(result, dict) and result.get("__interrupt__"):
             self._sessions.update_session(thread_id, status="awaiting_approval")
+            await self._runtime.persist_session_to_memory(thread_id)
             return {"status": "awaiting_approval", "interrupt": result["__interrupt__"]}
 
         self._sessions.update_session(thread_id, status="active")
+        await self._runtime.persist_session_to_memory(thread_id)
         return {"status": "complete", "result": result}
 
     async def get_state(self, thread_id: str) -> dict[str, Any] | None:

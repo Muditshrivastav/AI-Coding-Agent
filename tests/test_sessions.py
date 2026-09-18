@@ -1,10 +1,12 @@
 """
-tests/test_sessions.py - Unit test verifying multi-session management.
+tests/test_sessions.py - Unit test verifying multi-session management and LangGraphRuntime integration.
 """
 
+import pytest
 import shutil
 from pathlib import Path
 from agent.session_manager import SessionManager
+from frameworks.langgraph_runtime import LangGraphRuntime
 
 
 def test_session_lifecycle(tmp_path: Path):
@@ -41,3 +43,43 @@ def test_session_lifecycle(tmp_path: Path):
     assert manager.delete_session(s2.id) is True
     assert manager.get_session(s2.id) is None
     assert len(manager.list_sessions()) == 1
+
+
+def test_langgraph_runtime_session_integration(tmp_path: Path):
+    manager = SessionManager(root_dir=str(tmp_path))
+    runtime = LangGraphRuntime(session_manager=manager, root_dir=str(tmp_path))
+
+    # Test create_session via ensure_session
+    thread_id = "thread-xyz-123"
+    session = runtime.ensure_session(thread_id, title="Test LangGraph Session")
+    assert session.id == thread_id
+    assert session.title == "Test LangGraph Session"
+    assert session.status == "active"
+    assert session.message_count == 0
+
+    # Ensure calling again returns the existing session
+    session_dup = runtime.ensure_session(thread_id, title="Another Title")
+    assert session_dup.id == thread_id
+    assert session_dup.title == "Test LangGraph Session"
+
+    # Test get_thread_config
+    config = runtime.get_thread_config(thread_id)
+    assert config == {"configurable": {"thread_id": thread_id}}
+
+    # Test update_session via update_session_state
+    updated = runtime.update_session_state(
+        thread_id,
+        stage="build",
+        status="awaiting_approval",
+        increment_messages=True,
+    )
+    assert updated is not None
+    assert updated.stage == "build"
+    assert updated.status == "awaiting_approval"
+    assert updated.message_count == 1
+
+    # Verify session list
+    sessions = runtime.list_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].id == thread_id
+    assert sessions[0].stage == "build"

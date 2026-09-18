@@ -1,16 +1,15 @@
 """
 nodes/planning_subagent.py - Planning subagent definition.
 Analyzes user request and writes plan.md dynamically per run via a deep agent
-backed by deepagents FileSystemBackend and LangChain's TODOListMiddleware.
+backed by deepagents FilesystemBackend and MemoryMiddleware.
 """
 
 from typing import Any
 
 import os
 
-from deepagents import create_deep_agent
-from deepagents.backends import FileSystemBackend
-from langchain.agents.middleware import TodoListMiddleware
+from deepagents import create_deep_agent, MemoryMiddleware
+from deepagents.backends import FilesystemBackend
 from langchain_core.tools import StructuredTool
 from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
@@ -80,8 +79,8 @@ def make_planning_subagent(
     )
 
     llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
-    backend = FileSystemBackend(root_dir=root_dir)
-    middleware = [TodoListMiddleware()]
+    backend = FilesystemBackend(root_dir=root_dir)
+    middleware = [MemoryMiddleware()]
 
     tools: list[Any] = [write_plan_tool] + list(extra_tools or [])
 
