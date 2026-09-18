@@ -17,6 +17,9 @@ class AgentState(TypedDict, total=False):
     todos: list[dict[str, Any]]                  # Deep Agents' write_todos task state
     verify_attempts: int
     verify_passed: bool
+    # Populated by verification_graph hitl_escalation_node when max_attempts is breached.
+    # Orchestrators inspect this to surface HITL approval data to the user.
+    escalation_payload: dict[str, Any] | None
     messages: Annotated[list[Any], add_messages]
     current_stage: Literal["planning", "design", "build", "verify", "done"]
 
@@ -33,6 +36,7 @@ def create_initial_state(user_request: str) -> AgentState:
         "todos": [],
         "verify_attempts": 0,
         "verify_passed": False,
+        "escalation_payload": None,
         "messages": [{"role": "user", "content": user_request}],
         "current_stage": "planning",
     }

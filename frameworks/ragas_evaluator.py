@@ -4,7 +4,7 @@ Evaluates context relevance and faithfulness of retrieved documents before gener
 """
 
 from typing import Any
-
+import ragas
 
 class RagasEvaluator:
     """Wraps RAGAS metrics to score codebase vs documentation retrieval quality."""

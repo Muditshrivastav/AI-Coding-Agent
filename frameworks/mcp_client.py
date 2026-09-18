@@ -11,7 +11,17 @@ import httpx
 from pydantic import create_model
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamablehttp_client
+
+try:
+    from mcp.client.sse import sse_client as streamablehttp_client
+except ImportError:
+    try:
+        from mcp.client.streamable_http import streamable_http_client as streamablehttp_client
+    except ImportError:
+        try:
+            from mcp.client.streamable_http import streamablehttp_client
+        except ImportError:
+            streamablehttp_client = None  # type: ignore[assignment]
 from langchain_core.tools import StructuredTool
 
 
@@ -39,12 +49,19 @@ class MCPClientWrapper:
             )
             read, write = await self._stack.enter_async_context(stdio_client(params))
         elif self._transport == "http":
-            read, write, _ = await self._stack.enter_async_context(
-                streamablehttp_client(
-                    url=self._kwargs["url"],
-                    headers=self._kwargs.get("headers"),
-                )
+            if streamablehttp_client is None:
+                raise ImportError("Neither 'mcp.client.sse.sse_client' nor 'streamable_http_client' is available in your installed MCP SDK.")
+            client_kwargs: dict[str, Any] = {"url": self._kwargs["url"]}
+            if self._kwargs.get("headers"):
+                client_kwargs["headers"] = self._kwargs["headers"]
+            conn = await self._stack.enter_async_context(
+                streamablehttp_client(**client_kwargs)  # type: ignore[operator]
             )
+            # Both sse_client and streamable_http_client return (read, write) or (read, write, _)
+            if isinstance(conn, (tuple, list)):
+                read, write = conn[0], conn[1]
+            else:
+                read, write = conn.read, conn.write
         else:
             raise ValueError(f"Unsupported transport: {self._transport}. Must be 'stdio' or 'http'.")
 
@@ -184,7 +201,7 @@ class RenderMCPClient:
 
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key or os.getenv("RENDER_API_KEY", "")
-        self._http: httpx.AsyncClient = httpx.AsyncClient(timeout=300.0)
+        self._http: httpx.AsyncClient = httpx.AsyncClient(timeout=10.0)
         self._session_id: str | None = None
         self._wrapper: MCPClientWrapper | None = None
 

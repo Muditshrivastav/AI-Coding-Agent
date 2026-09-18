@@ -18,7 +18,13 @@ import os
 from typing import Any
 from dotenv import load_dotenv
 from langchain_core.tools import StructuredTool
-from langchain_community.tools.tavily_search import TavilySearchResults
+try:
+    from langchain_tavily import TavilySearch as TavilySearchResults
+except ImportError:
+    try:
+        from langchain_tavily import TavilySearchResults
+    except ImportError:
+        from langchain_community.tools.tavily_search import TavilySearchResults
 from frameworks.mcp_client import MCPClientWrapper
 
 load_dotenv()

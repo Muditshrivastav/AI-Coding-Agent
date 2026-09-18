@@ -146,7 +146,8 @@ async def get_build_dev_tools(
 
     for client in clients:
         try:
-            mcp_tools = await client.get_tools()
+            import asyncio
+            mcp_tools = await asyncio.wait_for(client.get_tools(), timeout=5.0)
             for t in mcp_tools:
                 if t not in tools:
                     tools.append(harness_guard.wrap_tool_with_guard(t, interrupt_fn=interrupt))
