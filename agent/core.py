@@ -15,6 +15,7 @@ from agent.session_manager import SessionManager, SessionMetadata
 from nodes.planning_subagent import planning_subagent
 from nodes.design_subagent import design_subagent
 from nodes.build_subagent import build_dev_subagent
+from frameworks.evaluation import LangSmithTracer, HarnessEvaluator
 
 # ---------------------------------------------------------------------------
 # Input sanitization — known prompt-injection trigger phrases.
@@ -54,7 +55,8 @@ class CodingAgentHarness:
     ) -> None:
         self._root_dir = root_dir
         self._model = model
-        self._tracer = tracer
+        self._tracer = tracer or LangSmithTracer()
+        self._evaluator = HarnessEvaluator(tracer_instance=self._tracer)
 
         self._guard = HarnessGuard(f"{root_dir}/harness/permissions.json")
         self._backend = DeepAgentsBackend(root_dir=root_dir, guard=self._guard)
@@ -108,6 +110,14 @@ class CodingAgentHarness:
     @property
     def runtime(self) -> LangGraphRuntime:
         return self._runtime
+
+    @property
+    def tracer(self) -> LangSmithTracer:
+        return self._tracer
+
+    @property
+    def evaluator(self) -> HarnessEvaluator:
+        return self._evaluator
 
     # ------------------------------------------------------------------
     # Input sanitization

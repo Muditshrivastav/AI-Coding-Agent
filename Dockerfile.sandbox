@@ -1,0 +1,41 @@
+# Dockerfile.sandbox
+# ─────────────────────────────────────────────────────────────────────────────
+# Sandbox image for DockerSandboxBackend (frameworks/docker_sandbox.py).
+#
+# Build:
+#   cd "D:\Machine Learning\AI Coding Agent"
+#   docker build -f Dockerfile.sandbox -t ai-coding-agent-sandbox:latest .
+#
+# The project directory is BIND-MOUNTED at runtime — files are NOT copied here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+FROM python:3.12-slim
+
+LABEL maintainer="AI Coding Agent"
+LABEL description="Sandbox image — workspace bind-mounted at /workspace at runtime"
+
+# ── System packages ───────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    build-essential \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Python tooling ────────────────────────────────────────────────────────────
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# ── Pre-install core agent dependencies ──────────────────────────────────────
+# Installing by name avoids needing the full project source at build time.
+RUN pip install --no-cache-dir \
+    deepagents \
+    langchain \
+    langchain-core \
+    langgraph \
+    pytest
+
+# ── Working directory ─────────────────────────────────────────────────────────
+# /workspace is where the project is bind-mounted at runtime.
+WORKDIR /workspace
+
+CMD ["bash"]

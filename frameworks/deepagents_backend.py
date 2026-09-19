@@ -5,12 +5,19 @@ from deepagents.backends import LocalShellBackend
 from agent.guardrail import HarnessGuard
 
 
-class GuardedShellBackend:
-    """Wraps LocalShellBackend to enforce HarnessGuard (HITL) on all shell and file operations."""
+from frameworks.docker_sandbox import DockerSandboxBackend
 
-    def __init__(self, backend: LocalShellBackend, guard: HarnessGuard) -> None:
+
+class GuardedShellBackend:
+    """Wraps LocalShellBackend or DockerSandboxBackend to enforce HarnessGuard (HITL) on all shell and file operations."""
+
+    def __init__(self, backend: Any, guard: HarnessGuard) -> None:
         self._backend = backend
         self._guard = guard
+
+    @property
+    def raw_backend(self) -> Any:
+        return self._backend
 
     def execute(self, command: str) -> Any:
         """Executes a shell command after running it through the 3-gate HITL guard."""
@@ -44,25 +51,57 @@ class GuardedShellBackend:
             return fh.read()
 
     def __getattr__(self, name: str) -> Any:
-        """Forward any other attributes directly to the underlying LocalShellBackend."""
+        """Forward any other attributes directly to the underlying backend."""
         return getattr(self._backend, name)
 
 
 class DeepAgentsBackend:
-    """Wraps Deep Agents library, providing a root_dir scoped backend with active HarnessGuard HITL."""
+    """Wraps Deep Agents library, providing a root_dir scoped backend with active HarnessGuard HITL.
 
-    def __init__(self, root_dir: str = ".", guard: HarnessGuard | None = None) -> None:
+    Supports running in 'auto' (Docker sandbox with local fallback), 'docker' (strictly Docker),
+    or 'local' (host shell).
+    """
+
+    def __init__(
+        self,
+        root_dir: str = ".",
+        guard: HarnessGuard | None = None,
+        sandbox_mode: str = "auto",
+        docker_image: str = "ai-coding-agent-sandbox:latest",
+    ) -> None:
         self._root_dir = root_dir
         self._guard = guard or HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
-        raw_backend = LocalShellBackend(root_dir=root_dir)
+        self._sandbox_mode = sandbox_mode
+
+        if sandbox_mode == "local":
+            raw_backend: Any = LocalShellBackend(root_dir=root_dir)
+        else:
+            # "auto" or "docker"
+            raw_backend = DockerSandboxBackend(
+                root_dir=root_dir,
+                image=docker_image,
+                auto_fallback=(sandbox_mode == "auto"),
+            )
+
         self._backend = GuardedShellBackend(raw_backend, self._guard)
+
+    @property
+    def sandbox_mode(self) -> str:
+        return self._sandbox_mode
+
+    @property
+    def is_docker_active(self) -> bool:
+        raw = self.raw_backend
+        if isinstance(raw, DockerSandboxBackend):
+            return raw.is_docker_available
+        return False
 
     @property
     def backend(self) -> GuardedShellBackend:
         return self._backend
 
     @property
-    def raw_backend(self) -> LocalShellBackend:
+    def raw_backend(self) -> Any:
         return self._backend._backend
 
     @property

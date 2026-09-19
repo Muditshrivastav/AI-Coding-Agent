@@ -8,3 +8,15 @@ wheels/
 
 # Virtual environments
 .venv
+
+# environment variable
+.env
+.env.*
+.env.local
+!.env.example
+
+# Test and pytest temporary directories
+tests/_tmp/
+pytest_tmp/
+pytest_temp/
+.pytest_cache/
