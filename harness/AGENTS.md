@@ -1,27 +1,36 @@
-# Project: Coding Agent Harness
-An autonomous coding agent built as an execution harness to plan, design, build, verify, and deploy software projects end-to-end.
+# Autonomous Coding Agent Directives
 
-## Structure
-- `agent/`: Orchestrator harness and shared state.
-- `nodes/`: Planning, design, and build subagents.
-- `frameworks/`: Isolated class wrappers (strictly one external framework per file).
-- `tools/`: Custom API-backed tools, retrievers, and deploy tools.
-- `interfaces/`: Streamlit HITL approval UI, FastAPI server, and ACP server.
-- `harness/`: System of record and operational guardrails.
+Operational system-of-record and behavioral guidelines for all subagents (`planning`, `design`, `build`).
 
-## Commands
-- Verify (all checks): `make verify`
-- Lint: `ruff check . --fix`
-- Format: `ruff format .`
-- Test: `pytest -q`
+## Agent Mission & Dynamic Workflow
+The agent is driven dynamically by the **user query**. Rather than assuming a fixed repository structure, the agent analyzes the incoming user request and executes the end-to-end lifecycle:
 
-## Conventions
-1. Each file under `frameworks/` wraps exactly one framework — never mix raw external library calls across files.
-2. Subagents read `PLAN.md` / `ARCHITECTURE.md` via file reading tools — never re-derive scope themselves.
-3. All shell/file-write actions go through `LocalShellBackend` — nothing executes outside `root_dir`.
-4. Staged writes must be approved before execution.
+1. **Intake & Scope Determination**:
+   - Analyze the user request, requirements, target tech stack, and workspace context.
+   - Inspect existing project structure dynamically using filesystem tools instead of relying on hardcoded file hierarchies.
 
-## Do Not
-- Edit or delete a test to make a run pass.
-- Push to GitHub or trigger a deploy without an approval checkpoint.
-- Add a new dependency without flagging it in `PLAN.md` first.
+2. **Planning (`planning-agent`)**:
+   - Translate the user query into a concrete `plan.md` defining scope, requirements, architectural constraints, acceptance criteria, and needed files/dependencies.
+   - Flag any new dependencies in `plan.md` before installation.
+
+3. **Architecture & Design (`design-agent`)**:
+   - Read `plan.md` and translate requirements into `ARCHITECTURE.md` (component contracts, interfaces, and data models).
+
+4. **Implementation & Build (`build-agent`)**:
+   - Decompose specifications from `plan.md` and `ARCHITECTURE.md` into actionable items in `progress.md`.
+   - Write code into workspace files within sandboxed boundaries (`LocalShellBackend`).
+   - Run verification loops (`make verify`, linting, unit tests) and iterate on failures.
+   - Follow `harness/GITHUB.md` for staging, committing, and remote publishing when approved.
+
+## Core Conventions
+1. **Dynamic Orientation**: Explore the codebase dynamically with tools before acting — project structure is dictated by user goals and existing repository state.
+2. **System of Record**: Subagents read `plan.md` and `ARCHITECTURE.md` — never re-derive or invent requirements out-of-band.
+3. **Sandbox Boundary**: All shell and file-write operations must execute through `LocalShellBackend` within `root_dir`.
+4. **Approval & Permissions**: Staged writes, external deployments, and `git push` operations require approval as dictated by `harness/permissions.json`.
+
+## Prohibited Actions (Do Not)
+- Never edit or delete a test simply to make a verification run pass.
+- Never execute commands or write files outside `root_dir`.
+- Never push to GitHub or deploy without the required HITL approval checkpoint.
+- Never add or install dependencies without documenting them in `plan.md` first.
+
