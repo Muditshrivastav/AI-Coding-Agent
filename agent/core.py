@@ -16,6 +16,8 @@ from nodes.planning_subagent import planning_subagent
 from nodes.design_subagent import design_subagent
 from nodes.build_subagent import build_dev_subagent
 from frameworks.evaluation import LangSmithTracer, HarnessEvaluator
+from frameworks.agents_md_writer import generate_agents_md
+from skills.registry import skill_library
 
 # ---------------------------------------------------------------------------
 # Input sanitization — known prompt-injection trigger phrases.
@@ -119,6 +121,23 @@ class CodingAgentHarness:
     def evaluator(self) -> HarnessEvaluator:
         return self._evaluator
 
+    @property
+    def skills(self):
+        """Access the global SkillLibrary to register or load custom skills.
+
+        Example::
+
+            from skills.schema import Skill
+            harness.skills.register(Skill(
+                name="my-convention",
+                description="Team coding conventions",
+                tags=["python", "style"],
+                instructions="Always use Black. Max line 88. Type-annotate all functions.",
+            ))
+            harness.skills.load_from_directory("./my_skills/")
+        """
+        return skill_library
+
     # ------------------------------------------------------------------
     # Input sanitization
     # ------------------------------------------------------------------
@@ -181,6 +200,15 @@ class CodingAgentHarness:
 
         self._sessions.update_session(thread_id, increment_messages=True, status="active")
         await self._runtime.persist_session_to_memory(thread_id)
+
+        # ── Pre-flight: auto-generate a query-specific AGENTS.md ──────────────
+        # Runs before the agent graph so all subagents (planning, design, build)
+        # receive directives tailored to this exact user request.
+        await generate_agents_md(
+            user_request=user_request,
+            root_dir=self._root_dir,
+            model=self._model,
+        )
 
         result = await self._agent.ainvoke(
             input_payload,

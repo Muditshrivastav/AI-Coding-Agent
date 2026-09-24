@@ -1,0 +1,39 @@
+name: docker
+description: Containerize applications with Docker and Docker Compose
+tags: [docker, container, dockerfile, docker-compose, containerize, kubernetes, k8s, deploy]
+priority: 30
+examples:
+  - "dockerize my app"
+  - "add a Dockerfile"
+  - "create docker-compose"
+  - "containerize this service"
+  - "add kubernetes manifests"
+instructions: |
+  ## Docker & Containerization Guidelines
+
+  ### Dockerfile Best Practices
+  - Use official slim/alpine base images: `python:3.12-slim`, `node:20-alpine`.
+  - Use multi-stage builds to separate build and runtime layers (keep final image small).
+  - Pin base image tags — never use `:latest` in production Dockerfiles.
+  - Run as a non-root user in the final stage for security.
+  - Use `.dockerignore` to exclude `.git`, `.venv`, `__pycache__`, `node_modules`.
+
+  ### Layer Caching
+  - Copy dependency files (`requirements.txt`, `package.json`) BEFORE copying source code.
+  - Install dependencies in a separate `RUN` layer so code changes don't bust the cache.
+
+  ### Environment Variables
+  - Never bake secrets into the image. Use environment variables or Docker secrets.
+  - Use `ARG` for build-time variables, `ENV` for runtime variables.
+
+  ### docker-compose.yml
+  - Define `healthcheck` for each service so dependent services wait for readiness.
+  - Use named volumes for persistent data (databases).
+  - Set `restart: unless-stopped` for production services.
+  - Use `.env` file for local secrets; never commit it.
+
+  ### Files to Create
+  - `Dockerfile` — multi-stage production build
+  - `docker-compose.yml` — local dev orchestration
+  - `.dockerignore` — exclusion list
+  - `docker-compose.override.yml` — local dev overrides (hot-reload, debug ports)

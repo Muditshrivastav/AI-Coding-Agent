@@ -256,3 +256,130 @@ def render_mcp_client(api_key: str | None = None) -> RenderMCPClient:
     """Return a RenderMCPClient ready to connect to https://mcp.render.com/mcp."""
     return RenderMCPClient(api_key=api_key)
 
+
+# ---------------------------------------------------------------------------
+# WebMCP client (Chrome web pages interaction)
+# ---------------------------------------------------------------------------
+class WebMCPClient:
+    """MCP client for WebMCP (@jason.today/webmcp), enabling the agent to interact
+
+    directly with active Chrome web pages and tabs via standard MCP stdio transport.
+    """
+
+    def __init__(
+        self,
+        command: str = "npx",
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+    ) -> None:
+        self._command = command
+        self._args = args if args is not None else ["-y", "@jason.today/webmcp@latest", "--mcp"]
+        self._env = env
+        self._wrapper = MCPClientWrapper(
+            transport="stdio",
+            command=self._command,
+            args=self._args,
+            env=self._env,
+        )
+
+    async def connect(self) -> None:
+        """Connect to the WebMCP server process."""
+        await self._wrapper.connect()
+
+    async def get_tools(self) -> list[StructuredTool]:
+        """Fetch all browser and page interaction tools exposed by WebMCP."""
+        return await self._wrapper.get_tools()
+
+    async def close(self) -> None:
+        """Tear down WebMCP session."""
+        await self._wrapper.close()
+
+
+def webmcp_client(
+    command: str = "npx",
+    args: list[str] | None = None,
+    env: dict[str, str] | None = None,
+) -> WebMCPClient:
+    """Return a configured WebMCPClient instance."""
+    return WebMCPClient(command=command, args=args, env=env)
+
+
+# ---------------------------------------------------------------------------
+# Neo4j MCP Client (Direct Cypher query/write execution)
+# ---------------------------------------------------------------------------
+class Neo4jMCPClient:
+    """MCP client for Neo4j MCP server (python -m neo4j_mcp_server).
+
+    Allows agents to execute Cypher queries, explore schemas, and read/write
+    graph data directly in Neo4j via official MCP stdio transport.
+    """
+
+    def __init__(
+        self,
+        command: str = "python",
+        args: list[str] | None = None,
+        uri: str = "bolt://localhost:7687",
+        username: str = "neo4j",
+        password: str = "password",
+        database: str = "neo4j",
+        read_only: bool = False,
+        env: dict[str, str] | None = None,
+    ) -> None:
+        self._command = command
+        self._args = args if args is not None else ["-m", "neo4j_mcp_server"]
+        self._env = dict(env or {})
+        # Populate standard NEO4J_MCP_* configuration environment variables
+        self._env.setdefault("NEO4J_MCP_URI", uri)
+        self._env.setdefault("NEO4J_MCP_USERNAME", username)
+        self._env.setdefault("NEO4J_MCP_PASSWORD", password)
+        self._env.setdefault("NEO4J_MCP_DATABASE", database)
+        self._env.setdefault("NEO4J_MCP_READ_ONLY", "false" if not read_only else "true")
+        self._env.setdefault("NEO4J_MCP_TELEMETRY", "false")
+        self._env.setdefault("NEO4J_MCP_LOG_LEVEL", "info")
+        self._env.setdefault("NEO4J_MCP_LOG_FORMAT", "text")
+        self._env.setdefault("NEO4J_MCP_SCHEMA_SAMPLE_SIZE", "100")
+
+        self._wrapper = MCPClientWrapper(
+            transport="stdio",
+            command=self._command,
+            args=self._args,
+            env=self._env,
+        )
+
+    async def connect(self) -> None:
+        """Connect to the Neo4j MCP server process."""
+        await self._wrapper.connect()
+
+    async def get_tools(self) -> list[StructuredTool]:
+        """Fetch all Cypher and graph manipulation tools provided by neo4j-mcp-server."""
+        return await self._wrapper.get_tools()
+
+    async def close(self) -> None:
+        """Tear down Neo4j MCP session."""
+        await self._wrapper.close()
+
+
+def neo4j_mcp_client(
+    uri: str = "bolt://localhost:7687",
+    username: str = "neo4j",
+    password: str = "password",
+    database: str = "neo4j",
+    read_only: bool = False,
+    command: str = "python",
+    args: list[str] | None = None,
+    env: dict[str, str] | None = None,
+) -> Neo4jMCPClient:
+    """Return a configured Neo4jMCPClient instance."""
+    return Neo4jMCPClient(
+        command=command,
+        args=args,
+        uri=uri,
+        username=username,
+        password=password,
+        database=database,
+        read_only=read_only,
+        env=env,
+    )
+
+
+

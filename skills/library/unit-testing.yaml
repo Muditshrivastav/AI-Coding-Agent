@@ -1,0 +1,35 @@
+name: unit-testing
+description: Write comprehensive unit tests with pytest
+tags: [test, tests, unit test, pytest, testing, tdd, coverage, mock]
+priority: 20
+examples:
+  - "write unit tests for my service"
+  - "add pytest tests"
+  - "improve test coverage"
+  - "add tdd tests"
+  - "mock external dependencies in tests"
+instructions: |
+  ## Unit Testing Guidelines (pytest)
+
+  ### Structure
+  - Mirror the source tree: `tests/test_<module_name>.py` for each `<module_name>.py`.
+  - Name test functions descriptively: `test_<function>_<scenario>_<expected_result>`.
+  - Group related tests into classes only when they share meaningful setup (`TestUserService`).
+
+  ### Coverage
+  - Achieve ≥80% line coverage on new modules. Run: `pytest --cov=. --cov-report=term-missing`.
+  - Test the happy path, edge cases (empty inputs, None, zero), and failure paths (exceptions, timeouts).
+
+  ### Mocking
+  - Use `unittest.mock.patch` or `pytest-mock`'s `mocker` fixture for external dependencies (DB, HTTP, filesystem).
+  - Never make real network calls in unit tests — mock them at the boundary.
+  - Use `pytest.raises(ExceptionType)` to assert expected exceptions.
+
+  ### Fixtures
+  - Define shared setup in `conftest.py` using `@pytest.fixture` with appropriate scope (function/session).
+  - Use `tmp_path` fixture for filesystem tests — never write to the real project directory.
+
+  ### Anti-Patterns to Avoid
+  - Do not delete or weaken a test to make it pass.
+  - Do not use `time.sleep()` in tests — use `freezegun` or mock `datetime`.
+  - Do not assert on log output unless testing the logging module itself.

@@ -1,0 +1,41 @@
+name: rest-api
+description: Design and build RESTful APIs with FastAPI or Flask
+tags: [api, rest, fastapi, flask, endpoint, route, http, openapi, swagger, crud]
+priority: 25
+examples:
+  - "build a REST API"
+  - "add fastapi endpoints"
+  - "create CRUD routes"
+  - "add swagger documentation"
+  - "design API endpoints"
+instructions: |
+  ## REST API Design Guidelines
+
+  ### Naming & Structure
+  - Use plural nouns for resource collections: `/users`, `/orders`, `/products`.
+  - Nest sub-resources logically: `/users/{user_id}/orders/{order_id}`.
+  - Use HTTP verbs correctly: GET (read), POST (create), PUT (full update), PATCH (partial), DELETE.
+  - Version the API in the URL: `/api/v1/...`.
+
+  ### FastAPI Specifics
+  - Define Pydantic models for all request bodies and response schemas.
+  - Use `response_model=` on every route to enforce output schema.
+  - Use `Depends()` for dependency injection (auth, DB sessions, config).
+  - Use `HTTPException` with appropriate status codes (400, 401, 403, 404, 422, 500).
+  - Enable OpenAPI docs automatically available at `/docs` and `/redoc`.
+
+  ### Error Handling
+  - Return structured error JSON: `{"detail": "message", "code": "ERROR_CODE"}`.
+  - Log all 5xx errors server-side with tracebacks.
+  - Never expose internal stack traces or DB errors in API responses.
+
+  ### Security
+  - Validate and sanitize all inputs — use Pydantic validators.
+  - Implement rate limiting on public endpoints.
+  - Use HTTPS only in production. Add `CORS` middleware with explicit origins.
+
+  ### Files to Create
+  - `api/routes/<resource>.py` — one file per resource group
+  - `api/schemas/<resource>.py` — Pydantic request/response models
+  - `api/dependencies.py` — shared Depends() helpers
+  - `api/main.py` — FastAPI app factory

@@ -50,6 +50,8 @@ class ExternalToolsManager:
         mcp_servers: dict[str, Any] | None = None,
         chrome_command: str = "npx",
         chrome_args: list[str] | None = None,
+        webmcp_command: str = "npx",
+        webmcp_args: list[str] | None = None,
         tavily_api_key: str | None = None,
         tavily_max_results: int = 5,
     ) -> None:
@@ -61,18 +63,27 @@ class ExternalToolsManager:
         )
         self._github_mcp_image = github_mcp_image
 
-        # Standard mcpServers definition for chrome-devtools
+        # Standard mcpServers definition for chrome-devtools and webmcp
         self._mcp_servers = mcp_servers or {
             "mcpServers": {
                 "chrome-devtools": {
                     "command": "npx",
                     "args": ["-y", "chrome-devtools-mcp@latest"],
-                }
+                },
+                "webmcp": {
+                    "command": "npx",
+                    "args": ["-y", "@jason.today/webmcp@latest", "--mcp"],
+                },
             }
         }
-        chrome_config = self._mcp_servers.get("mcpServers", {}).get("chrome-devtools", {})
+        servers = self._mcp_servers.get("mcpServers", {})
+        chrome_config = servers.get("chrome-devtools", {})
         self._chrome_command = chrome_config.get("command", chrome_command)
         self._chrome_args = chrome_config.get("args", chrome_args or ["-y", "chrome-devtools-mcp@latest"])
+
+        webmcp_config = servers.get("webmcp", {})
+        self._webmcp_command = webmcp_config.get("command", webmcp_command)
+        self._webmcp_args = webmcp_config.get("args", webmcp_args or ["-y", "@jason.today/webmcp@latest", "--mcp"])
 
         # Tavily Search Tool
         tavily_key = tavily_api_key or os.getenv("TAVILY_API_KEY", "")
@@ -103,6 +114,13 @@ class ExternalToolsManager:
             transport="stdio",
             command=self._chrome_command,
             args=self._chrome_args,
+        )
+
+        # 3. WebMCP (stdio) for Chrome web page / tab interaction
+        self._mcp_clients["webmcp"] = MCPClientWrapper(
+            transport="stdio",
+            command=self._webmcp_command,
+            args=self._webmcp_args,
         )
 
     async def connect_all(self) -> None:

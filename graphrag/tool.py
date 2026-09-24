@@ -59,3 +59,41 @@ def create_graphrag_retriever_tool(
         ),
         args_schema=_GraphRAGQueryInput,
     )
+
+
+# ---------------------------------------------------------------------------
+# Neo4j MCP Server direct integration for GraphRAG
+# ---------------------------------------------------------------------------
+from frameworks.mcp_client import Neo4jMCPClient, neo4j_mcp_client
+
+
+async def create_neo4j_graphrag_mcp_tools(
+    uri: str = "bolt://localhost:7687",
+    username: str = "neo4j",
+    password: str = "password",
+    database: str = "neo4j",
+    read_only: bool = False,
+    command: str = "python",
+    args: list[str] | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[list[StructuredTool], Neo4jMCPClient]:
+    """Connects to the Neo4j MCP server (python -m neo4j_mcp_server) via stdio
+
+    and exposes its direct Cypher read/write and schema inspection tools for GraphRAG.
+
+    Returns:
+        (tools, client_instance) - Keep client_instance to close on teardown.
+    """
+    client = neo4j_mcp_client(
+        uri=uri,
+        username=username,
+        password=password,
+        database=database,
+        read_only=read_only,
+        command=command,
+        args=args,
+        env=env,
+    )
+    tools = await client.get_tools()
+    return tools, client
+

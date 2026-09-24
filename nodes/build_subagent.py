@@ -30,6 +30,99 @@ from pydantic import BaseModel, Field
 from agent.guardrail import HarnessGuard
 from langgraph.types import interrupt
 
+try:
+    from langchain_typesafe import Choice, Noul, Score, TypeSafeClassifier
+except ImportError:
+    Choice = Noul = Score = TypeSafeClassifier = None  # type: ignore[assignment,misc]
+
+
+class ProbabilisticDecisionArgs(BaseModel):
+    state: str = Field(
+        description="The context or problem description (e.g., 'Deploy failed with status 500' or 'Lint failed on auth module')."
+    )
+    decision_type: str = Field(
+        default="triage",
+        description="Type of decision to make: 'triage' (urgency, severity, team) or 'strategy' (retry, roll back, investigate, escalate).",
+    )
+
+
+def create_typesafe_decision_tool() -> StructuredTool | None:
+    """Creates a StructuredTool wrapping TypeSafeClassifier for low-token,
+
+    probabilistic structured decisions.
+    """
+    if TypeSafeClassifier is None:
+        return None
+
+    def run_decision(state: str, decision_type: str = "triage") -> str:
+        try:
+            classifier = TypeSafeClassifier()
+            if decision_type == "strategy":
+                questions = {
+                    "can_auto_fix": Noul(instructions="Can this issue likely be auto-fixed by code edits or re-running tests?"),
+                    "action": Choice(
+                        instructions="What is the recommended recovery action?",
+                        criteria={
+                            "investigate": "Inspect code tracebacks, logs, and AST/graph context.",
+                            "retry": "Transient error; retry build, test, or deployment step.",
+                            "rollback": "Breaking change; revert last commit or rollback deployment.",
+                            "escalate": "Requires human developer or architect intervention.",
+                        },
+                    ),
+                    "confidence": Score(
+                        instructions="How confident is this decision recommendation?",
+                        criteria=["Low confidence / ambiguous.", "Moderate confidence.", "High confidence."],
+                    ),
+                }
+            else:  # Default triage
+                questions = {
+                    "urgent": Noul(instructions="Does this need immediate attention or halt the build?"),
+                    "category": Choice(
+                        instructions="Which area or pipeline step does this failure belong to?",
+                        criteria={
+                            "build": "Compilation, syntax, or packaging error.",
+                            "test": "Unit or integration test failure.",
+                            "lint": "Linting, formatting, or static typing violation.",
+                            "deploy": "Deployment, network, or environment issue.",
+                        },
+                    ),
+                    "severity": Score(
+                        instructions="How severe is the issue?",
+                        criteria=["Cosmetic or minor warning.", "Blocking single module/test.", "Full pipeline breakage."],
+                    ),
+                }
+
+            response = classifier.invoke({"state": state, "questions": questions})
+
+            # Format the probabilistic structured output concisely
+            results = []
+            if hasattr(response, "nouls"):
+                for k, v in response.nouls.items():
+                    results.append(f"{k}: {getattr(v, 'noul', v)}")
+            if hasattr(response, "choices"):
+                for k, v in response.choices.items():
+                    choice_val = getattr(v, "choice", v)
+                    conf_val = getattr(v, "confidence", "")
+                    results.append(f"{k}: {choice_val} (confidence: {conf_val})")
+            if hasattr(response, "scores"):
+                for k, v in response.scores.items():
+                    results.append(f"{k}: {getattr(v, 'score', v)}")
+
+            return "[TypeSafe Probabilistic Decision]\n" + "\n".join(results)
+        except Exception as exc:
+            return f"TypeSafe decision failed: {exc}"
+
+    return StructuredTool.from_function(
+        func=run_decision,
+        name="probabilistic_decision",
+        description=(
+            "Makes low-token, probabilistic, type-safe structured decisions for triage, "
+            "error recovery, and action selection using TypeSafeClassifier."
+        ),
+        args_schema=ProbabilisticDecisionArgs,
+    )
+
+
 class ShellCommandArgs(BaseModel):
     command: str = Field(description="The shell command string to execute (e.g. 'git status', 'git add .', 'git commit -m ...').")
 
@@ -74,6 +167,7 @@ Your task is to implement the system specified in PLAN.md and ARCHITECTURE.md.
 
 Tool Usage & Integration:
 - Terminal & Shell Execution: Use the `execute_command` tool (or built-in `execute`) to run git commands (following `harness/GITHUB.md`) and any host shell commands needed.
+- Probabilistic Decisions (Low-token): Use the `probabilistic_decision` tool for triage and strategy decisions when encountering errors or needing structured probabilistic categorization without heavy reasoning token overhead.
 - Self-Verification: Call the `run_verification` tool ('all', 'lint', or 'test') to validate your changes. It runs linting and pytest tests, returning actionable stdout/stderr tracebacks. If verification fails, inspect the traceback, resolve the issue in code, and verify again.
 - External Tools: Use Tavily search (tavily_search_results_json) to search documentation, libraries, and external APIs.
 - MCP Tools: Use GitHub MCP tools for repository operations (branches, commits, PRs, issues) and Chrome DevTools MCP for browser inspection and UI debugging.
@@ -161,7 +255,13 @@ async def get_build_dev_tools(
         except Exception:
             pass
 
-    # 5. LocalShellBackend Terminal & Shell Execution Tool (with HITL Guardrail Layer)
+    # 5. TypeSafe Probabilistic Decision Tool (Low-token classification & triage)
+    if not any(getattr(t, "name", "") == "probabilistic_decision" for t in tools):
+        typesafe_tool = create_typesafe_decision_tool()
+        if typesafe_tool is not None:
+            tools.append(typesafe_tool)
+
+    # 6. LocalShellBackend Terminal & Shell Execution Tool (with HITL Guardrail Layer)
     if not any(getattr(t, "name", "") == "execute_command" for t in tools):
         # Hard failure here: if the guarded shell tool cannot be created the build
         # subagent must not run without it, as unguarded shell access would be unsafe.
@@ -245,6 +345,12 @@ def build_dev_subagent(
             tools.append(create_verification_tool(root_dir=root_dir, interrupt_fn=interrupt))
         except Exception:
             pass
+
+    # Immediately wire TypeSafe probabilistic decision tool
+    if not any(getattr(t, "name", "") == "probabilistic_decision" for t in tools):
+        typesafe_tool = create_typesafe_decision_tool()
+        if typesafe_tool is not None:
+            tools.append(typesafe_tool)
 
     # LocalShellBackend Terminal & Shell Execution Tool (with HITL Guardrail Layer)
     # Hard failure: the build subagent must not run without a guarded shell tool.

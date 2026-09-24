@@ -1,0 +1,37 @@
+name: oauth
+description: Implement OAuth 2.0 / OpenID Connect login flows securely
+tags: [oauth, auth, authentication, login, google, github, sso, openid, jwt, token]
+priority: 10
+examples:
+  - "add google oauth to my login page"
+  - "implement github oauth"
+  - "add sso authentication"
+  - "add jwt login"
+  - "add social login"
+instructions: |
+  ## OAuth 2.0 Implementation Guidelines
+
+  ### Flow Selection
+  - Use **Authorization Code Flow with PKCE** for all web apps (never Implicit Flow).
+  - Use **Client Credentials Flow** only for server-to-server (machine-to-machine) auth.
+
+  ### Token Storage
+  - Store access tokens in **HttpOnly, Secure, SameSite=Strict cookies** — never in localStorage or sessionStorage.
+  - Short-lived access tokens (≤15 min). Long-lived refresh tokens stored server-side only.
+
+  ### Security Requirements
+  - Always validate the `state` parameter on the OAuth callback to prevent CSRF attacks.
+  - Validate `iss`, `aud`, and `exp` claims on all JWTs before trusting them.
+  - Use PKCE (`code_verifier` + `code_challenge`) for public clients.
+  - Revoke tokens on logout; do not just delete the cookie client-side.
+
+  ### Recommended Libraries
+  - Python backend: `authlib` or `python-social-auth`
+  - FastAPI: use `fastapi-users` with OAuth backend
+  - Next.js: use `next-auth`
+
+  ### Files to Create/Modify
+  - `auth/oauth.py` — provider client setup, token exchange, user info fetch
+  - `auth/routes.py` — `/auth/login`, `/auth/callback`, `/auth/logout` endpoints
+  - `auth/middleware.py` — session validation middleware
+  - `.env` — `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, `OAUTH_REDIRECT_URI`

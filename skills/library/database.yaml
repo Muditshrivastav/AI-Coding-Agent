@@ -1,0 +1,40 @@
+name: database
+description: Set up and use SQL/NoSQL databases with migrations and ORM
+tags: [database, db, sql, postgres, sqlite, mysql, mongodb, orm, sqlalchemy, alembic, migration]
+priority: 35
+examples:
+  - "add a database"
+  - "set up postgres"
+  - "add sqlalchemy models"
+  - "create database migrations"
+  - "add alembic migrations"
+  - "use mongodb"
+instructions: |
+  ## Database Integration Guidelines
+
+  ### ORM & Migrations (SQL)
+  - Use **SQLAlchemy 2.x** with `DeclarativeBase` for all Python SQL projects.
+  - Use **Alembic** for schema migrations — always generate migrations, never apply `create_all()` in production.
+  - Define models in `db/models/` — one file per domain model.
+  - Define the engine and session factory in `db/session.py`. Use `async_sessionmaker` for async apps.
+
+  ### Connection Management
+  - Use **connection pooling** — never create a new connection per request.
+  - Always close sessions in a `finally` block or use `async with session:` context managers.
+  - Load DB credentials from environment variables — never hardcode.
+
+  ### Query Patterns
+  - Use parameterized queries / ORM methods — never f-string SQL (SQL injection risk).
+  - Add database indexes on all foreign keys and frequently filtered columns.
+  - Paginate large result sets with `LIMIT`/`OFFSET` or cursor-based pagination.
+
+  ### Data Integrity
+  - Define constraints at the database level (NOT NULL, UNIQUE, FK constraints) — not just at the app level.
+  - Run all schema-altering migrations in transactions so they are atomic.
+  - Test migrations up and down before merging: `alembic upgrade head && alembic downgrade -1`.
+
+  ### Files to Create
+  - `db/models/<name>.py` — SQLAlchemy model definitions
+  - `db/session.py` — engine, session factory, `get_db` dependency
+  - `alembic/` — migration directory (run `alembic init alembic`)
+  - `alembic.ini` — Alembic config (set `sqlalchemy.url` from env)
