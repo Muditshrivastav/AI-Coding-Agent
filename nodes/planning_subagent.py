@@ -11,6 +11,7 @@ import os
 from deepagents import create_deep_agent, MemoryMiddleware
 from deepagents.backends import FilesystemBackend
 from langchain_core.tools import StructuredTool
+from langchain_groq import ChatGroq
 from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
 from langgraph.types import interrupt
@@ -39,7 +40,7 @@ def make_planning_subagent(
 ) -> Any:
     """
     Constructs a deep planning agent that:
-    - Uses ChatOllama (gpt-oss:120b-cloud, temperature=0.2) as the LLM.
+    - Uses ChatGroq (qwen/qwen3.8-27b) with ChatOllama (gpt-oss:120b-cloud) fallback.
     - Uses FileSystemBackend scoped to *root_dir* so it can read files.
     - Exposes a HarnessGuard-protected ``write_plan`` tool for writing plan.md,
       so every plan write is gated by permissions.json (defaults to "ask").
@@ -78,7 +79,9 @@ def make_planning_subagent(
         args_schema=_WritePlanArgs,
     )
 
-    llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
+    primary_llm = ChatGroq(model="qwen/qwen3.8-27b", temperature=0.2)
+    fallback_llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
+    llm = primary_llm.with_fallbacks([fallback_llm])
     backend = FilesystemBackend(root_dir=root_dir)
     middleware = [MemoryMiddleware()]
 

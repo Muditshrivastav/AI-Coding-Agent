@@ -51,7 +51,7 @@ class CodingAgentHarness:
     def __init__(
         self,
         root_dir: str = ".",
-        model: str = "ollama:qwen3.5:0.8b",
+        model: str = "groq:qwen/qwen3.8-27b",
         tools: list[Any] | None = None,
         tracer: Any = None,
     ) -> None:

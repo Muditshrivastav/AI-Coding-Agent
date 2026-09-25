@@ -27,7 +27,7 @@ import os
 
 from dotenv import load_dotenv
 
-load_dotenv()  # Load .env so OLLAMA_API_KEY and related vars are available
+load_dotenv()  # Load .env so GROQ_API_KEY and related vars are available
 
 from skills.registry import skill_library
 
@@ -83,7 +83,7 @@ async def generate_agents_md(
         user_request: The raw user query (e.g. "Add OAuth login to my app").
         root_dir:     Project workspace root, anchors the harness/ directory.
         model:        Optional LLM override. Resolved from AGENTS_MD_MODEL env var
-                      or falls back to gpt-oss:120b-cloud via ChatOllama.
+                      or falls back to qwen/qwen3.8-27b via ChatGroq.
 
     Returns:
         The generated AGENTS.md content string, or empty string on failure.
@@ -150,22 +150,27 @@ async def _call_llm_for_agents_md(
 
 
 def _build_llm(model: str | None = None) -> object:
-    """Constructs a lightweight LLM instance for AGENTS.md generation using ChatOllama.
+    """Constructs a lightweight LLM instance for AGENTS.md generation using ChatGroq.
 
     Resolution order:
       1. Explicit model argument.
       2. AGENTS_MD_MODEL environment variable.
-      3. Falls back to qwen3.5:0.8b.
+      3. Falls back to qwen/qwen3.8-27b.
 
-    Note: Strips any LangChain provider prefix (e.g. ``ollama:``) before passing
-    the model name to ChatOllama, which expects the bare Ollama model tag.
+    Note: Strips any LangChain provider prefix (e.g. ``groq:`` or ``ollama:``) before passing
+    the model name to ChatGroq.
     """
     resolved = model or os.getenv("AGENTS_MD_MODEL", "")
-    # Strip provider prefix that init_chat_model uses (e.g. "ollama:qwen3.5:0.8b" → "qwen3.5:0.8b")
-    if resolved.startswith("ollama:"):
+    # Strip provider prefix that init_chat_model uses (e.g. "groq:qwen/qwen3.8-27b" → "qwen/qwen3.8-27b")
+    if resolved.startswith("groq:"):
+        resolved = resolved[len("groq:"):]
+    elif resolved.startswith("ollama:"):
         resolved = resolved[len("ollama:"):]
+    from langchain_groq import ChatGroq
     from langchain_ollama import ChatOllama
-    return ChatOllama(model=resolved or "qwen3.5:0.8b", temperature=0.2)
+    primary = ChatGroq(model=resolved or "qwen/qwen3.8-27b", temperature=0.2)
+    fallback = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
+    return primary.with_fallbacks([fallback])
 
 
 def _write_agents_md(path: str, user_request: str, content: str) -> None:

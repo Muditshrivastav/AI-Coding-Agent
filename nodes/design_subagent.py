@@ -12,6 +12,7 @@ import os
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from langchain_core.tools import StructuredTool
+from langchain_groq import ChatGroq
 from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
 from langgraph.types import interrupt
@@ -40,7 +41,8 @@ async def make_design_subagent(
     """Build a deep design agent wired with draw.io MCP tools and FileSystemBackend.
 
     What happens inside:
-      1. ``ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)`` is used as the LLM.
+      1. ``ChatGroq(model="qwen/qwen3.8-27b", temperature=0.2)`` is used as primary LLM,
+         falling back to ``ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)``.
       2. ``FilesystemBackend(root_dir)`` lets the agent read files from disk.
       3. A HarnessGuard-protected ``write_architecture`` tool gates every write to
          ARCHITECTURE.md through permissions.json before touching disk.
@@ -89,7 +91,9 @@ async def make_design_subagent(
         args_schema=_WriteArchArgs,
     )
 
-    llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
+    primary_llm = ChatGroq(model="qwen/qwen3.8-27b", temperature=0.2)
+    fallback_llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
+    llm = primary_llm.with_fallbacks([fallback_llm])
     backend = FilesystemBackend(root_dir=root_dir)
 
     drawio: DrawioMCPClient = drawio_mcp_client()

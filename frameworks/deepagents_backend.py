@@ -320,7 +320,7 @@ class DeepAgentsBackend:
 
     def build_agent(
         self,
-        model: str,
+        model: Any,
         subagents: list[Any],
         system_prompt: str | None = None,
         checkpointer: Any = None,
@@ -329,8 +329,18 @@ class DeepAgentsBackend:
     ) -> Any:
         from deepagents import create_deep_agent
 
+        # If a string provider model was given for groq, configure it with ChatOllama fallback
+        resolved_model = model
+        if isinstance(model, str) and model.startswith("groq:"):
+            from langchain_groq import ChatGroq
+            from langchain_ollama import ChatOllama
+            bare_model = model[len("groq:"):]
+            primary = ChatGroq(model=bare_model, temperature=0.2)
+            fallback = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
+            resolved_model = primary.with_fallbacks([fallback])
+
         kwargs: dict[str, Any] = {
-            "model": model,
+            "model": resolved_model,
             "backend": self._backend,
             "subagents": subagents,
             "checkpointer": checkpointer,

@@ -12,6 +12,7 @@ from typing import Any
 
 from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
+from langchain_groq import ChatGroq
 from langchain_ollama import ChatOllama
 
 from frameworks.external_tools import ExternalToolsManager
@@ -272,7 +273,7 @@ async def get_build_dev_tools(
 
 async def make_build_subagent(
     root_dir: str = ".",
-    model: str = "gpt-oss:120b-cloud",
+    model: str = "qwen/qwen3.8-27b",
     temperature: float = 0.2,
     extra_tools: list[Any] | None = None,
     external_tools_manager: ExternalToolsManager | None = None,
@@ -295,7 +296,9 @@ async def make_build_subagent(
     Returns:
         (deep_agent, external_tools_manager, active_mcp_clients)
     """
-    llm = ChatOllama(model=model, temperature=temperature)
+    primary_llm = ChatGroq(model=model, temperature=temperature)
+    fallback_llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=temperature)
+    llm = primary_llm.with_fallbacks([fallback_llm])
     backend = LocalShellBackend(root_dir=root_dir)
 
     tools, ext_mgr, active_mcp_clients = await get_build_dev_tools(
