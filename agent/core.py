@@ -51,7 +51,7 @@ class CodingAgentHarness:
     def __init__(
         self,
         root_dir: str = ".",
-        model: str = "anthropic:claude-sonnet-4-6",
+        model: str = "ollama:qwen3.5:0.8b",
         tools: list[Any] | None = None,
         tracer: Any = None,
     ) -> None:

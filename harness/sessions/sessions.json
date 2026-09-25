@@ -7,5 +7,14 @@
     "stage": "planning",
     "message_count": 0,
     "status": "active"
+  },
+  {
+    "id": "default-build-thread",
+    "title": "design a fastapi endpoints for coding ag",
+    "created_at": "2026-09-25T07:10:08.139935+00:00",
+    "updated_at": "2026-09-25T08:35:40.358727+00:00",
+    "stage": "planning",
+    "message_count": 9,
+    "status": "active"
   }
 ]

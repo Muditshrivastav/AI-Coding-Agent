@@ -25,9 +25,28 @@ from __future__ import annotations
 import logging
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()  # Load .env so OLLAMA_API_KEY and related vars are available
+
 from skills.registry import skill_library
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_AGENTS_MD_PATH = os.path.join("harness", "AGENTS.md")
+
+
+def _read_agents_md(path: str) -> str:
+    """Read the existing AGENTS.md from disk, returning its content or empty string."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            content = fh.read().strip()
+        return content
+    except FileNotFoundError:
+        return ""
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"AgentsMDWriter: Could not read existing AGENTS.md at '{path}': {exc}")
+        return ""
 
 _AGENTS_MD_GEN_SYSTEM_PROMPT = (
     "You are a technical architect assistant for an autonomous multi-agent coding harness.\n\n"
@@ -71,7 +90,7 @@ async def generate_agents_md(
     """
     agents_md_path = os.path.join(root_dir, "harness", "AGENTS.md")
     try:
-        content = await _call_llm_for_agents_md(user_request, model=model)
+        content = await _call_llm_for_agents_md(user_request, model=model, root_dir=root_dir)
         if not content or not content.strip():
             logger.warning("AgentsMDWriter: LLM returned empty content, skipping write.")
             return ""
@@ -94,13 +113,31 @@ async def generate_agents_md(
         return ""
 
 
-async def _call_llm_for_agents_md(user_request: str, model: str | None = None) -> str:
-    """Invokes the LLM to produce AGENTS.md content for the given user request."""
+async def _call_llm_for_agents_md(
+    user_request: str,
+    model: str | None = None,
+    root_dir: str = ".",
+) -> str:
+    """Invokes the LLM to produce AGENTS.md content for the given user request.
+
+    Injects the existing harness/AGENTS.md as base context so the LLM extends
+    the established conventions rather than generating from a blank slate.
+    """
     from langchain_core.messages import HumanMessage, SystemMessage
+
+    # Load existing AGENTS.md as base context for the LLM
+    agents_md_path = os.path.join(root_dir, "harness", "AGENTS.md")
+    existing_agents_md = _read_agents_md(agents_md_path)
+    base_context = (
+        f"\n\n---\n## Existing AGENTS.md (Base Conventions — extend, do not contradict):\n\n"
+        f"{existing_agents_md}"
+        if existing_agents_md
+        else ""
+    )
 
     llm = _build_llm(model)
     messages = [
-        SystemMessage(content=_AGENTS_MD_GEN_SYSTEM_PROMPT),
+        SystemMessage(content=_AGENTS_MD_GEN_SYSTEM_PROMPT + base_context),
         HumanMessage(
             content=(
                 f"User request:\n\n{user_request.strip()}\n\n"
@@ -113,34 +150,22 @@ async def _call_llm_for_agents_md(user_request: str, model: str | None = None) -
 
 
 def _build_llm(model: str | None = None) -> object:
-    """Constructs a lightweight LLM instance for AGENTS.md generation.
+    """Constructs a lightweight LLM instance for AGENTS.md generation using ChatOllama.
 
     Resolution order:
       1. Explicit model argument.
       2. AGENTS_MD_MODEL environment variable.
-      3. Falls back to ChatOllama with gpt-oss:120b-cloud.
+      3. Falls back to qwen3.5:0.8b.
+
+    Note: Strips any LangChain provider prefix (e.g. ``ollama:``) before passing
+    the model name to ChatOllama, which expects the bare Ollama model tag.
     """
     resolved = model or os.getenv("AGENTS_MD_MODEL", "")
-
-    if resolved.startswith("anthropic:") or "claude" in resolved:
-        from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(
-            model=resolved.replace("anthropic:", ""),
-            temperature=0.2,
-            max_tokens=1024,
-        )
-
-    if resolved.startswith("openai:") or resolved.startswith("gpt-4") or resolved.startswith("gpt-3"):
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=resolved.replace("openai:", ""),
-            temperature=0.2,
-            max_tokens=1024,
-        )
-
-    # Default: local Ollama (matches the rest of the harness)
+    # Strip provider prefix that init_chat_model uses (e.g. "ollama:qwen3.5:0.8b" → "qwen3.5:0.8b")
+    if resolved.startswith("ollama:"):
+        resolved = resolved[len("ollama:"):]
     from langchain_ollama import ChatOllama
-    return ChatOllama(model=resolved or "gpt-oss:120b-cloud", temperature=0.2)
+    return ChatOllama(model=resolved or "qwen3.5:0.8b", temperature=0.2)
 
 
 def _write_agents_md(path: str, user_request: str, content: str) -> None:
