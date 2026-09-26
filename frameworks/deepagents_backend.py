@@ -272,21 +272,22 @@ class DeepAgentsBackend:
         self,
         root_dir: str = ".",
         guard: HarnessGuard | None = None,
-        sandbox_mode: str = "auto",
+        sandbox_mode: str | None = None,
         docker_image: str = "ai-coding-agent-sandbox:latest",
     ) -> None:
         self._root_dir = root_dir
         self._guard = guard or HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
-        self._sandbox_mode = sandbox_mode
+        # Read from explicit param or SANDBOX_MODE env var; default to "local"
+        self._sandbox_mode = sandbox_mode or os.environ.get("SANDBOX_MODE", "local")
 
-        if sandbox_mode == "local":
+        if self._sandbox_mode == "local":
             raw_backend: Any = LocalShellBackend(root_dir=root_dir)
         else:
             # "auto" or "docker"
             raw_backend = DockerSandboxBackend(
                 root_dir=root_dir,
                 image=docker_image,
-                auto_fallback=(sandbox_mode == "auto"),
+                auto_fallback=(self._sandbox_mode == "auto"),
             )
 
         self._backend = GuardedShellBackend(raw_backend, self._guard)
@@ -306,12 +307,28 @@ class DeepAgentsBackend:
     def backend(self) -> GuardedShellBackend:
         return self._backend
 
+    @backend.setter
+    def backend(self, backend: GuardedShellBackend | Any) -> None:
+        """Update backend. If not already wrapped in GuardedShellBackend, wrap it."""
+        if isinstance(backend, GuardedShellBackend):
+            self._backend = backend
+            self._guard = backend._guard
+        else:
+            self._backend = GuardedShellBackend(backend, self._guard)
+
     @property
     def raw_backend(self) -> Any:
-        return self._backend._backend
+        """Return the underlying un-guarded backend instance."""
+        return self._backend.raw_backend
+
+    @raw_backend.setter
+    def raw_backend(self, raw: Any) -> None:
+        """Set a new underlying backend and rebuild GuardedShellBackend wrapper."""
+        self._backend = GuardedShellBackend(raw, self._guard)
 
     @property
     def guard(self) -> HarnessGuard:
+        """Return the active HarnessGuard instance."""
         return self._guard
 
     def execute_command(self, command: str) -> Any:
@@ -327,24 +344,36 @@ class DeepAgentsBackend:
         tools: list[Any] | None = None,
         state_schema: Any = None,
     ) -> Any:
+        import inspect
         from deepagents import create_deep_agent
 
-        # If a string provider model was given for groq, configure it with ChatOllama fallback
-        resolved_model = model
+        # deepagents >= 0.7.19 calls .partition() on the model internally, so it must
+        # receive either a plain string model identifier OR a bare BaseChatModel instance.
+        # Do NOT wrap with .with_fallbacks() before passing — that returns a
+        # RunnableWithFallbacks which has no .partition() and causes AttributeError.
+        resolved_model: Any
+        fallback_model: Any = None
+
         if isinstance(model, str) and model.startswith("groq:"):
             from langchain_groq import ChatGroq
             from langchain_ollama import ChatOllama
             bare_model = model[len("groq:"):]
-            primary = ChatGroq(model=bare_model, temperature=0.2)
-            fallback = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
-            resolved_model = primary.with_fallbacks([fallback])
+            resolved_model = ChatGroq(model=bare_model, temperature=0.2)
+            fallback_model = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
+        else:
+            resolved_model = model
 
         kwargs: dict[str, Any] = {
             "model": resolved_model,
             "backend": self._backend,
-            "subagents": subagents,
             "checkpointer": checkpointer,
         }
+
+        # Only pass subagents if the installed deepagents version accepts it.
+        sig = inspect.signature(create_deep_agent)
+        if "subagents" in sig.parameters and subagents:
+            kwargs["subagents"] = subagents
+
         if system_prompt:
             kwargs["system_prompt"] = system_prompt
         if tools:
@@ -352,4 +381,17 @@ class DeepAgentsBackend:
         if state_schema:
             kwargs["state_schema"] = state_schema
 
-        return create_deep_agent(**kwargs)
+        agent = create_deep_agent(**kwargs)
+
+        # Wire the Ollama fallback at the compiled runnable level (post-creation),
+        # so deepagents never sees a RunnableWithFallbacks as its model argument.
+        if fallback_model is not None and hasattr(agent, "with_fallbacks"):
+            agent = agent.with_fallbacks([
+                create_deep_agent(
+                    **{**kwargs, "model": fallback_model}
+                )
+            ])
+
+        return agent
+
+

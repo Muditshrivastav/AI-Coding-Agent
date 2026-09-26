@@ -54,6 +54,7 @@ class CodingAgentHarness:
         model: str = "groq:qwen/qwen3.8-27b",
         tools: list[Any] | None = None,
         tracer: Any = None,
+        sandbox_mode: str | None = None,
     ) -> None:
         self._root_dir = root_dir
         self._model = model
@@ -61,7 +62,11 @@ class CodingAgentHarness:
         self._evaluator = HarnessEvaluator(tracer_instance=self._tracer)
 
         self._guard = HarnessGuard(f"{root_dir}/harness/permissions.json")
-        self._backend = DeepAgentsBackend(root_dir=root_dir, guard=self._guard)
+        self._backend = DeepAgentsBackend(
+            root_dir=root_dir,
+            guard=self._guard,
+            sandbox_mode=sandbox_mode,
+        )
         self._sessions = SessionManager(root_dir=root_dir)
         self._runtime = LangGraphRuntime(session_manager=self._sessions, root_dir=root_dir)
         self._external_tools = ExternalToolsManager()

@@ -8,11 +8,34 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel
 
-from agent.core import CodingAgentHarness
+import logging
+import os
+from pathlib import Path
+import sys
+
+# Ensure repository root is on sys.path even when executed directly
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from fastapi.middleware.cors import CORSMiddleware
+from frameworks.vscode_workspace import resolve_workspace_root
 from tools.github_oauth import vault, build_authorization_url, exchange_code_for_token
 
+logger = logging.getLogger("api_server")
+logging.basicConfig(level=logging.INFO)
+
 app = FastAPI(title="Coding Agent Harness API", version="0.1.0")
-harness: CodingAgentHarness | None = None
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+harness = None
 
 
 class CreateSessionRequest(BaseModel):
@@ -32,7 +55,17 @@ class ResumeRequest(BaseModel):
 @app.on_event("startup")
 async def startup_event() -> None:
     global harness
-    harness = CodingAgentHarness(root_dir=".", tools=[])
+    try:
+        from agent.core import CodingAgentHarness
+        root_dir = resolve_workspace_root()
+        logger.info(f"🗂️  Agent workspace root: {root_dir}")
+        harness = CodingAgentHarness(root_dir=root_dir, tools=[], sandbox_mode="local")
+        logger.info("✅ CodingAgentHarness initialized successfully (sandbox_mode=local).")
+    except Exception as exc:
+        import traceback
+        logger.error(f"❌ Harness startup failed: {exc}")
+        logger.error(traceback.format_exc())
+        # Leave harness=None so endpoints return 503 instead of crashing
 
 
 @app.get("/health")
@@ -196,8 +229,47 @@ async def github_auth_status(user_id: str) -> dict[str, Any]:
     return {"user_id": user_id, "connected": vault.has(user_id, "github")}
 
 
-@app.delete("/auth/github/revoke/{user_id}")
-async def github_revoke(user_id: str) -> dict[str, str]:
-    """Remove the stored GitHub token for this user (logout / re-auth)."""
-    vault.revoke(user_id, "github")
-    return {"status": "revoked", "user_id": user_id}
+@app.get("/workspace/files")
+async def get_workspace_files(path: str = "") -> dict[str, Any]:
+    """Return directory tree listing for workspace viewer."""
+    import os
+    base_dir = os.path.abspath(".")
+    target_dir = os.path.abspath(os.path.join(base_dir, path))
+    if not target_dir.startswith(base_dir):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    entries = []
+    try:
+        for entry in os.scandir(target_dir):
+            if entry.name.startswith((".", "__pycache__", "venv", "node_modules")):
+                continue
+            entries.append({
+                "name": entry.name,
+                "path": os.path.relpath(entry.path, base_dir).replace("\\", "/"),
+                "is_dir": entry.is_dir(),
+                "size": entry.stat().st_size if not entry.is_dir() else None,
+            })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    entries.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
+    return {"files": entries, "current_path": path}
+
+
+@app.get("/workspace/file")
+async def get_file_content(path: str = Query(..., description="Relative file path")) -> dict[str, Any]:
+    """Read file content for IDE code viewer."""
+    import os
+    base_dir = os.path.abspath(".")
+    full_path = os.path.abspath(os.path.join(base_dir, path))
+    if not full_path.startswith(base_dir):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not os.path.exists(full_path) or os.path.isdir(full_path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    try:
+        with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read(100_000)
+        return {"path": path, "content": content}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
