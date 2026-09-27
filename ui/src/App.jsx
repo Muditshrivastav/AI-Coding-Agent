@@ -45,6 +45,7 @@ export default function App() {
   const [isRunning, setIsRunning] = useState(false)
   const [pendingApproval, setPendingApproval] = useState(null)
   const [attachments, setAttachments] = useState([])
+  const [selectedModel, setSelectedModel] = useState('groq:qwen/qwen3.8-27b')
   const fileInputRef = useRef(null)
   
   // Workspace explorer states
@@ -277,6 +278,7 @@ export default function App() {
         body: JSON.stringify({
           user_request: finalPrompt,
           thread_id: activeSessionId,
+          model: selectedModel,
         }),
       })
 
@@ -488,7 +490,7 @@ export default function App() {
             <span className="status-dot"></span>
             <span>Harness Guard Active</span>
           </div>
-          <Shield size={14} style={{ color: 'var(--accent-cyan)' }} />
+          <Shield size={14} style={{ color: 'var(--text-muted)' }} />
         </div>
       </aside>
 
@@ -578,7 +580,7 @@ export default function App() {
           )}
 
           {isRunning && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--accent-cyan)', fontSize: '12.5px', padding: '10px 0' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-main)', fontSize: '12.5px', padding: '10px 0' }}>
               <RefreshCw size={14} className="spin" style={{ animation: 'spin 1s linear infinite' }} />
               <span>Autonomous agent planning and executing commands...</span>
             </div>
@@ -598,7 +600,7 @@ export default function App() {
                     {att.type === 'image' ? (
                       <img src={att.dataUrl} alt={att.name} className="attachment-chip-thumb" />
                     ) : (
-                      <File size={13} style={{ color: 'var(--accent-cyan)' }} />
+                      <File size={13} style={{ color: 'var(--text-muted)' }} />
                     )}
                     <span className="attachment-chip-name">{att.name}</span>
                     <button
@@ -646,8 +648,18 @@ export default function App() {
                   <Plus size={16} />
                 </button>
                 <div className="model-pill">
-                  <Cpu size={12} style={{ color: 'var(--accent-cyan)' }} />
-                  <span>qwen/qwen3.8-27b (Groq)</span>
+                  <Cpu size={12} style={{ color: 'var(--text-muted)' }} />
+                  <select
+                    className="model-select"
+                    value={selectedModel}
+                    onChange={(e) => setSelectedModel(e.target.value)}
+                    title="Select AI Model"
+                  >
+                    <option value="groq:qwen/qwen3.8-27b">qwen/qwen3.8-27b (Groq)</option>
+                    <option value="ollama:gpt-oss:120b-cloud">gpt-oss:120b-cloud (Ollama)</option>
+                    <option value="ollama:gemma4:cloud">gemma4:cloud (Ollama)</option>
+                    <option value="ollama:nemotron-3-super:cloud">nemotron-3-super:cloud (Ollama)</option>
+                  </select>
                 </div>
               </div>
 
