@@ -11,6 +11,9 @@ import {
   FileCode,
   Sparkles,
   ChevronRight,
+  ChevronDown,
+  Folder,
+  FolderOpen,
   Cpu,
   Layers,
   Code2,
@@ -18,18 +21,31 @@ import {
   ExternalLink,
   GitBranch,
   Shield,
-  Activity
+  Activity,
+  Paperclip,
+  Image as ImageIcon,
+  X,
+  File
 } from 'lucide-react'
 
 const API_BASE = 'http://localhost:8000'
 
+const getWelcomeMessage = () => ({
+  id: 'init-1',
+  sender: 'agent',
+  time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+  text: `👋 **AI Coding Agent Ready.**\n\n- **Sandbox:** Local Shell Execution (No Docker required)\n- **Guardrail:** Active (\`permissions.json\` HITL Gate)\n- **Model:** Groq / Ollama Hybrid Engine\n\nWhat would you like me to build or inspect today?`,
+})
+
 export default function App() {
   const [sessions, setSessions] = useState([])
   const [activeSessionId, setActiveSessionId] = useState('')
-  const [messages, setMessages] = useState([])
+  const [messages, setMessages] = useState([getWelcomeMessage()])
   const [prompt, setPrompt] = useState('')
   const [isRunning, setIsRunning] = useState(false)
   const [pendingApproval, setPendingApproval] = useState(null)
+  const [attachments, setAttachments] = useState([])
+  const fileInputRef = useRef(null)
   
   // Workspace explorer states
   const [rightPanelTab, setRightPanelTab] = useState('files') // 'files' | 'artifacts' | 'guard'
@@ -87,6 +103,15 @@ export default function App() {
     }
   }
 
+  const handleSelectSession = (sessionId) => {
+    if (sessionId === activeSessionId) return
+    // Clear out previous session messages immediately so they don't bleed into new session
+    setMessages([getWelcomeMessage()])
+    setPendingApproval(null)
+    setAttachments([])
+    setActiveSessionId(sessionId)
+  }
+
   const handleCreateSession = async (title = 'New Agent Task') => {
     try {
       const res = await fetch(`${API_BASE}/sessions`, {
@@ -97,19 +122,62 @@ export default function App() {
       if (res.ok) {
         const newSession = await res.json()
         setSessions(prev => [newSession, ...prev])
+        setMessages([getWelcomeMessage()])
+        setPendingApproval(null)
+        setAttachments([])
         setActiveSessionId(newSession.id)
-        setMessages([
-          {
-            id: 'init-1',
-            sender: 'agent',
-            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            text: `👋 **Antigravity AI Agent Harness Ready.**\n\n- **Sandbox:** Local Shell Execution (No Docker required)\n- **Guardrail:** Active (\`permissions.json\` HITL Gate)\n- **Model:** Groq / Ollama Hybrid Engine\n\nWhat would you like me to build or inspect today?`,
-          }
-        ])
       }
     } catch (err) {
       console.error(err)
     }
+  }
+
+  const handleFileSelect = (e) => {
+    const files = Array.from(e.target.files || [])
+    if (!files.length) return
+
+    files.forEach(file => {
+      const isImg = file.type.startsWith('image/')
+      const reader = new FileReader()
+
+      if (isImg) {
+        reader.onload = (event) => {
+          setAttachments(prev => [
+            ...prev,
+            {
+              id: `att-${Date.now()}-${Math.random()}`,
+              name: file.name,
+              type: 'image',
+              size: file.size,
+              dataUrl: event.target.result,
+            }
+          ])
+        }
+        reader.readAsDataURL(file)
+      } else {
+        // Read as text snippet if possible (code / config / text files)
+        reader.onload = (event) => {
+          setAttachments(prev => [
+            ...prev,
+            {
+              id: `att-${Date.now()}-${Math.random()}`,
+              name: file.name,
+              type: 'file',
+              size: file.size,
+              content: event.target.result,
+            }
+          ])
+        }
+        reader.readAsText(file)
+      }
+    })
+
+    // Reset input so re-selecting same file triggers onChange
+    if (e.target) e.target.value = ''
+  }
+
+  const handleRemoveAttachment = (id) => {
+    setAttachments(prev => prev.filter(a => a.id !== id))
   }
 
   const handleDeleteSession = async (id, e) => {
@@ -120,7 +188,7 @@ export default function App() {
       if (activeSessionId === id) {
         const remaining = sessions.filter(s => s.id !== id)
         if (remaining.length > 0) {
-          setActiveSessionId(remaining[0].id)
+          handleSelectSession(remaining[0].id)
         } else {
           handleCreateSession()
         }
@@ -150,8 +218,18 @@ export default function App() {
             if (lastPrev !== lastMapped) return mapped
             return prev
           })
+          return
         }
       }
+      // If thread has no runs or messages recorded yet, ensure clean initial greeting
+      setMessages(prev => {
+        if (prev.length === 1 && prev[0].id === 'init-1') return prev
+        // Only reset if it's currently holding messages from an execution
+        if (prev.some(m => m.id !== 'init-1')) {
+          return [getWelcomeMessage()]
+        }
+        return prev
+      })
     } catch (err) {
       // No state yet for thread
     }
@@ -160,15 +238,34 @@ export default function App() {
   // --- Run Execution & HITL Guard ---
   const handleSendMessage = async (e) => {
     e?.preventDefault()
-    if (!prompt.trim() || isRunning) return
+    if ((!prompt.trim() && attachments.length === 0) || isRunning) return
 
-    const userText = prompt
+    const rawPrompt = prompt
+    const currentAttachments = [...attachments]
     setPrompt('')
+    setAttachments([])
+
+    // Construct enriched prompt with attached file contents / names
+    let finalPrompt = rawPrompt.trim()
+    const fileSnippets = currentAttachments.map(att => {
+      if (att.type === 'file' && att.content) {
+        return `\n\n--- Attachment: ${att.name} ---\n\`\`\`\n${att.content.slice(0, 10000)}\n\`\`\``
+      } else if (att.type === 'image') {
+        return `\n\n[Attached image: ${att.name}]`
+      }
+      return `\n\n[Attached file: ${att.name}]`
+    }).join('')
+
+    if (fileSnippets) {
+      finalPrompt = `${finalPrompt || 'Please review the attached file(s):'}${fileSnippets}`
+    }
+
     const userMsg = {
       id: `user-${Date.now()}`,
       sender: 'user',
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      text: userText,
+      text: rawPrompt || `Shared ${currentAttachments.length} file(s)`,
+      attachments: currentAttachments,
     }
     setMessages(prev => [...prev, userMsg])
     setIsRunning(true)
@@ -178,7 +275,7 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          user_request: userText,
+          user_request: finalPrompt,
           thread_id: activeSessionId,
         }),
       })
@@ -248,20 +345,41 @@ export default function App() {
   }
 
   // --- Workspace & Code Inspector ---
-  const fetchFiles = async () => {
+  const [expandedFolders, setExpandedFolders] = useState({})
+  const [folderContents, setFolderContents] = useState({})
+
+  const fetchFiles = async (folderPath = '') => {
     try {
-      const res = await fetch(`${API_BASE}/workspace/files`)
+      const url = folderPath 
+        ? `${API_BASE}/workspace/files?path=${encodeURIComponent(folderPath)}`
+        : `${API_BASE}/workspace/files`
+      const res = await fetch(url)
       if (res.ok) {
         const data = await res.json()
-        setFiles(data.files || [])
+        if (!folderPath) {
+          setFiles(data.files || [])
+        } else {
+          setFolderContents(prev => ({ ...prev, [folderPath]: data.files || [] }))
+        }
       }
     } catch (err) {
       console.log('Workspace files fetch error:', err)
     }
   }
 
+  const toggleFolder = async (folder) => {
+    const isExpanded = !!expandedFolders[folder.path]
+    setExpandedFolders(prev => ({ ...prev, [folder.path]: !isExpanded }))
+    if (!isExpanded && !folderContents[folder.path]) {
+      await fetchFiles(folder.path)
+    }
+  }
+
   const handleSelectFile = async (file) => {
-    if (file.is_dir) return
+    if (file.is_dir) {
+      toggleFolder(file)
+      return
+    }
     setSelectedFile(file)
     try {
       const res = await fetch(`${API_BASE}/workspace/file?path=${encodeURIComponent(file.path)}`)
@@ -274,6 +392,58 @@ export default function App() {
     }
   }
 
+  const renderFileTree = (items, depth = 0) => {
+    return items.map(f => {
+      const isDir = f.is_dir
+      const isExpanded = !!expandedFolders[f.path]
+      const children = folderContents[f.path] || []
+
+      return (
+        <div key={f.path}>
+          <div
+            className={`file-tree-item ${selectedFile?.path === f.path ? 'active' : ''}`}
+            style={{ paddingLeft: `${8 + depth * 14}px` }}
+            onClick={() => handleSelectFile(f)}
+          >
+            {isDir ? (
+              <>
+                <span style={{ display: 'inline-flex', alignItems: 'center', opacity: 0.6 }}>
+                  {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                </span>
+                {isExpanded ? (
+                  <FolderOpen size={14} style={{ color: 'var(--accent-amber)' }} />
+                ) : (
+                  <Folder size={14} style={{ color: 'var(--accent-amber)' }} />
+                )}
+              </>
+            ) : (
+              <>
+                <span style={{ width: '12px', display: 'inline-block' }} />
+                <FileCode size={14} style={{ color: 'var(--accent-cyan)' }} />
+              </>
+            )}
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {f.name}
+            </span>
+          </div>
+
+          {/* Render children if folder is open */}
+          {isDir && isExpanded && (
+            <div className="file-tree-subfolder">
+              {children.length === 0 ? (
+                <div style={{ paddingLeft: `${24 + depth * 14}px`, fontSize: '11px', color: 'var(--text-dim)', fontStyle: 'italic', paddingBottom: '4px' }}>
+                  (Empty)
+                </div>
+              ) : (
+                renderFileTree(children, depth + 1)
+              )}
+            </div>
+          )}
+        </div>
+      )
+    })
+  }
+
   return (
     <div className="app-container">
       {/* 1. Left Sidebar: Antigravity Session Tree & Workspaces */}
@@ -283,9 +453,8 @@ export default function App() {
             <div className="logo-icon-wrap">
               <Sparkles size={16} />
             </div>
-            <span>ANTIGRAVITY</span>
+            <span>CODING AGENT</span>
           </div>
-          <span className="badge-tag">v2.0</span>
         </div>
 
         <button className="btn-new-chat" onClick={() => handleCreateSession()}>
@@ -301,7 +470,7 @@ export default function App() {
             <div
               key={s.id}
               className={`session-item ${activeSessionId === s.id ? 'active' : ''}`}
-              onClick={() => setActiveSessionId(s.id)}
+              onClick={() => handleSelectSession(s.id)}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <Code2 size={14} style={{ color: activeSessionId === s.id ? 'var(--accent-cyan)' : 'var(--text-dim)' }} />
@@ -356,10 +525,24 @@ export default function App() {
               </div>
               <div className="message-body">
                 <div className="message-meta">
-                  <span className="message-sender">{msg.sender === 'user' ? 'Developer' : 'Antigravity Agent'}</span>
+                  <span className="message-sender">{msg.sender === 'user' ? 'Developer' : 'AI Agent'}</span>
                   <span className="message-time">{msg.time}</span>
                 </div>
                 <div className="message-bubble">
+                  {msg.attachments && msg.attachments.length > 0 && (
+                    <div className="message-attachments-preview">
+                      {msg.attachments.map(att => (
+                        <div key={att.id} className="message-att-item">
+                          {att.type === 'image' ? (
+                            <img src={att.dataUrl} alt={att.name} className="message-att-thumb" />
+                          ) : (
+                            <File size={13} style={{ color: 'var(--accent-cyan)' }} />
+                          )}
+                          <span className="message-att-name">{att.name}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                     {msg.text}
                   </div>
@@ -407,9 +590,33 @@ export default function App() {
         {/* Input Dock */}
         <div className="input-dock">
           <form className="input-box" onSubmit={handleSendMessage}>
+            {/* Attachment preview tray */}
+            {attachments.length > 0 && (
+              <div className="attachments-tray">
+                {attachments.map(att => (
+                  <div key={att.id} className="attachment-chip">
+                    {att.type === 'image' ? (
+                      <img src={att.dataUrl} alt={att.name} className="attachment-chip-thumb" />
+                    ) : (
+                      <File size={13} style={{ color: 'var(--accent-cyan)' }} />
+                    )}
+                    <span className="attachment-chip-name">{att.name}</span>
+                    <button
+                      type="button"
+                      className="attachment-remove-btn"
+                      onClick={() => handleRemoveAttachment(att.id)}
+                      title="Remove"
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <textarea
               className="prompt-textarea"
-              placeholder="Ask Antigravity to build, debug, refactor, or test (e.g. 'Build an authentication API with tests')..."
+              placeholder="Ask the agent to build, debug, refactor, or test (e.g. 'Build an authentication API with tests')..."
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={(e) => {
@@ -419,15 +626,35 @@ export default function App() {
                 }
               }}
             />
+
+            <input
+              type="file"
+              ref={fileInputRef}
+              style={{ display: 'none' }}
+              multiple
+              onChange={handleFileSelect}
+            />
+
             <div className="input-controls">
-              <div className="model-pill">
-                <Cpu size={12} style={{ color: 'var(--accent-cyan)' }} />
-                <span>qwen/qwen3.8-27b (Groq)</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="attach-btn"
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Attach files or images"
+                >
+                  <Plus size={16} />
+                </button>
+                <div className="model-pill">
+                  <Cpu size={12} style={{ color: 'var(--accent-cyan)' }} />
+                  <span>qwen/qwen3.8-27b (Groq)</span>
+                </div>
               </div>
+
               <button
                 type="submit"
                 className="send-btn"
-                disabled={!prompt.trim() || isRunning}
+                disabled={(!prompt.trim() && attachments.length === 0) || isRunning}
                 title="Send Command"
               >
                 <Play size={14} fill="currentColor" />
@@ -465,16 +692,7 @@ export default function App() {
                 <div style={{ fontSize: '11px', color: 'var(--text-dim)', padding: '4px 6px', fontWeight: 600, textTransform: 'uppercase' }}>
                   Workspace Files
                 </div>
-                {files.map(f => (
-                  <div
-                    key={f.path}
-                    className="file-tree-item"
-                    onClick={() => handleSelectFile(f)}
-                  >
-                    {f.is_dir ? <FolderTree size={14} style={{ color: 'var(--accent-amber)' }} /> : <FileCode size={14} style={{ color: 'var(--accent-cyan)' }} />}
-                    <span>{f.name}</span>
-                  </div>
-                ))}
+                {renderFileTree(files)}
               </div>
             ) : (
               <div className="code-viewer-container">

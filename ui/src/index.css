@@ -513,6 +513,111 @@ body {
   font-family: var(--font-mono);
 }
 
+.attach-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.attach-btn:hover {
+  background: rgba(56, 189, 248, 0.15);
+  color: var(--accent-cyan);
+  border-color: rgba(56, 189, 248, 0.35);
+  transform: translateY(-1px);
+}
+
+.attachments-tray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.attachment-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  color: var(--text-main);
+  max-width: 200px;
+}
+
+.attachment-chip-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  object-fit: cover;
+}
+
+.attachment-chip-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.attachment-remove-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  padding: 0;
+  border-radius: 50%;
+  transition: color 0.15s;
+}
+
+.attachment-remove-btn:hover {
+  color: var(--accent-rose);
+}
+
+.message-attachments-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.message-att-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.message-att-thumb {
+  max-width: 120px;
+  max-height: 80px;
+  border-radius: 4px;
+  object-fit: cover;
+  display: block;
+}
+
+.message-att-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
 .send-btn {
   background: linear-gradient(135deg, var(--accent-cyan), #0284c7);
   color: #fff;
@@ -605,6 +710,12 @@ body {
   background: rgba(56, 189, 248, 0.12);
   color: var(--accent-cyan);
   font-weight: 500;
+}
+
+.file-tree-subfolder {
+  position: relative;
+  display: flex;
+  flex-direction: column;
 }
 
 .code-viewer-container {
