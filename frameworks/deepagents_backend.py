@@ -360,6 +360,12 @@ class DeepAgentsBackend:
             bare_model = model[len("groq:"):]
             resolved_model = ChatGroq(model=bare_model, temperature=0.2)
             fallback_model = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
+        elif isinstance(model, str) and model.startswith("ollama:"):
+            from langchain_groq import ChatGroq
+            from langchain_ollama import ChatOllama
+            bare_model = model[len("ollama:"):]
+            resolved_model = ChatOllama(model=bare_model, temperature=0.2)
+            fallback_model = ChatGroq(model="qwen/qwen3.8-27b", temperature=0.2)
         else:
             resolved_model = model
 

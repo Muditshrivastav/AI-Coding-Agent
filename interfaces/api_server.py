@@ -46,6 +46,7 @@ class CreateSessionRequest(BaseModel):
 class RunRequest(BaseModel):
     user_request: str
     thread_id: str | None = None
+    model: str | None = None
 
 
 class ResumeRequest(BaseModel):
@@ -137,7 +138,7 @@ async def start_run(req: RunRequest) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Harness not initialized.")
 
     thread_id = req.thread_id or str(uuid.uuid4())
-    result = await harness.run(req.user_request, thread_id=thread_id)
+    result = await harness.run(req.user_request, thread_id=thread_id, model=req.model)
     return {"thread_id": thread_id, **result}
 
 

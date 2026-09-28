@@ -25,6 +25,7 @@ from frameworks.mcp_client import (
 )
 from tools.deploy_tools import DeployToolset
 from tools.verification_tools import VerificationToolset, create_verification_tool
+from tools.api_tools import APIToolset
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
@@ -170,9 +171,10 @@ Tool Usage & Integration:
 - Terminal & Shell Execution: Use the `execute_command` tool (or built-in `execute`) to run git commands (following `harness/GITHUB.md`) and any host shell commands needed.
 - Probabilistic Decisions (Low-token): Use the `probabilistic_decision` tool for triage and strategy decisions when encountering errors or needing structured probabilistic categorization without heavy reasoning token overhead.
 - Self-Verification: Call the `run_verification` tool ('all', 'lint', or 'test') to validate your changes. It runs linting and pytest tests, returning actionable stdout/stderr tracebacks. If verification fails, inspect the traceback, resolve the issue in code, and verify again.
+- API Tools & Web Search: Use `tavily_web_search` for web/doc search, GitHub REST tools (`github_create_issue`, `github_list_issues`, `github_create_pr`, `github_repo_info`, `github_list_commits`) for repository management, `supabase_query` for database interactions, `render_service_status` for deployment inspection, `groq_infer` for fast sub-LLM tasks, and `langsmith_recent_runs` for debugging traces.
 - External Tools: Use Tavily search (tavily_search_results_json) to search documentation, libraries, and external APIs.
 - MCP Tools: Use GitHub MCP tools for repository operations (branches, commits, PRs, issues) and Chrome DevTools MCP for browser inspection and UI debugging.
-- Deployment Tools: Use deploy tools and Render/Vercel MCP tools to verify and trigger staging/production deployments.
+- Deployment Tools: Use deploy tools (`deploy_to_render`) and Render/Vercel MCP tools to verify and trigger staging/production deployments.
 
 Build Loop Rules:
 1. Orientation: Read AGENTS.md, PLAN.md, ARCHITECTURE.md, progress.md, harness/GITHUB.md, and check git status.
@@ -212,13 +214,21 @@ async def get_build_dev_tools(
     # Shared guard instance for this tool-set build.
     harness_guard = HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
 
-    # 1. Base Deployment Tools
+    # 1. Base Deployment & API Tools
     if include_deploy and not any(getattr(t, "name", "") == "deploy_to_render" for t in tools):
         try:
             deploy_toolset = DeployToolset(root_dir=root_dir)
             tools.extend(deploy_toolset.get_tools())
         except Exception:
             pass
+
+    try:
+        api_toolset = APIToolset()
+        for api_tool in api_toolset.get_tools():
+            if not any(getattr(t, "name", "") == api_tool.name for t in tools):
+                tools.append(harness_guard.wrap_tool_with_guard(api_tool, interrupt_fn=interrupt))
+    except Exception:
+        pass
 
     # 2. External Tools Manager (Tavily + GitHub MCP + Chrome DevTools MCP)
     ext_mgr = external_tools_manager or ExternalToolsManager()
@@ -341,6 +351,15 @@ def build_dev_subagent(
     # Immediately wire synchronous external tools (like Tavily search) — guarded.
     if ext_mgr._tavily_tool and ext_mgr._tavily_tool not in tools:
         tools.append(harness_guard.wrap_tool_with_guard(ext_mgr._tavily_tool, interrupt_fn=interrupt))
+
+    # Immediately wire API Tools (Tavily, GitHub REST, Supabase, Render, Groq, LangSmith) — guarded
+    try:
+        api_toolset = APIToolset()
+        for api_tool in api_toolset.get_tools():
+            if not any(getattr(t, "name", "") == api_tool.name for t in tools):
+                tools.append(harness_guard.wrap_tool_with_guard(api_tool, interrupt_fn=interrupt))
+    except Exception:
+        pass
 
     # Immediately wire self-verification tool with real HITL escalation
     if not any(getattr(t, "name", "") == "run_verification" for t in tools):

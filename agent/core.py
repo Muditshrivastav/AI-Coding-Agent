@@ -9,6 +9,9 @@ from frameworks.langgraph_runtime import LangGraphRuntime
 from frameworks.external_tools import ExternalToolsManager
 from tools.deploy_tools import DeployToolset
 from tools.verification_tools import VerificationToolset
+from tools.api_tools import APIToolset
+from graphrag.ingest_tool import create_repo_ingest_tool
+from graphrag.tool import create_graphrag_retriever_tool
 from agent.guardrail import HarnessGuard
 from agent.state import AgentState, create_initial_state
 from agent.session_manager import SessionManager, SessionMetadata
@@ -72,10 +75,17 @@ class CodingAgentHarness:
         self._external_tools = ExternalToolsManager()
         self._deploy_tools = DeployToolset(root_dir=root_dir)
         self._verification_tools = VerificationToolset(root_dir=root_dir)
+        self._api_tools = APIToolset()
         self._tools = (
             tools
             if tools is not None
-            else [*self._deploy_tools.get_tools(), *self._verification_tools.get_tools()]
+            else [
+                *self._deploy_tools.get_tools(),
+                *self._verification_tools.get_tools(),
+                *self._api_tools.get_tools(),
+                create_repo_ingest_tool(),      # auto-ingest GitHub repos into Neo4j
+                create_graphrag_retriever_tool(),  # query Neo4j for code context
+            ]
         )
 
         # Build subagents hierarchy
@@ -160,8 +170,8 @@ class CodingAgentHarness:
                 return pattern
         return None
 
-    async def run(self, user_request: str, thread_id: str) -> dict[str, Any]:
-        """Executes a run for a specific thread.
+    async def run(self, user_request: str, thread_id: str, model: str | None = None) -> dict[str, Any]:
+        """Executes a run for a specific thread with an optional model override.
 
         Performs a prompt-injection pre-flight check before handing the request
         to the agent. Suspicious inputs are logged to harness/failures.md and
@@ -209,13 +219,39 @@ class CodingAgentHarness:
         # ── Pre-flight: auto-generate a query-specific AGENTS.md ──────────────
         # Runs before the agent graph so all subagents (planning, design, build)
         # receive directives tailored to this exact user request.
+        chosen_model = model or self._model
         await generate_agents_md(
             user_request=user_request,
             root_dir=self._root_dir,
-            model=self._model,
+            model=chosen_model,
         )
 
-        result = await self._agent.ainvoke(
+        agent_to_invoke = self._agent
+        if model and model != self._model:
+            # Dynamically build agent with requested model override
+            subagents = [
+                planning_subagent,
+                design_subagent,
+                build_dev_subagent(
+                    self._tools,
+                    external_tools=self._external_tools,
+                    root_dir=self._root_dir,
+                    backend=self._backend.backend,
+                    guard=self._guard,
+                ),
+            ]
+            agent_to_invoke = self._backend.build_agent(
+                model=chosen_model,
+                subagents=subagents,
+                system_prompt=(
+                    "You are an autonomous coding harness agent. Always follow AGENTS.md, "
+                    "respect permissions.json, coordinate planning -> design -> build, and verify all code."
+                ),
+                checkpointer=self._runtime.checkpointer,
+                state_schema=AgentState,
+            )
+
+        result = await agent_to_invoke.ainvoke(
             input_payload,
             config=config,
         )
