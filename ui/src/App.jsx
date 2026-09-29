@@ -28,7 +28,7 @@ import {
   File
 } from 'lucide-react'
 
-const API_BASE = 'http://localhost:8000'
+const API_BASE = 'http://127.0.0.1:8000'
 
 const getWelcomeMessage = () => ({
   id: 'init-1',

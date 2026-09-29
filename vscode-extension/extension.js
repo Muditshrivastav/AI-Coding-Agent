@@ -23,14 +23,14 @@
  * 4. Provide a "codingAgent.openUi" command that focuses the sidebar view.
  */
 
-const vscode  = require('vscode');
-const path    = require('path');
-const fs      = require('fs');
-const crypto  = require('crypto');
+const vscode = require('vscode');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-const VIEW_ID   = 'codingAgent.ui';
-const API_BASE  = 'http://127.0.0.1:8000';
+const VIEW_ID = 'codingAgent.ui';
+const API_BASE = 'http://127.0.0.1:8000';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -97,7 +97,7 @@ function buildHtml(webview, distDir, n) {
   // Vite emits paths like  ./assets/index-AbCd.js  and  ./assets/index-XyZ.css
   // when base is set to './'
   html = html.replace(/(href|src)="(\.\/assets\/[^"]+)"/g, (_, attr, assetRel) => {
-    const assetPath  = path.join(distDir, assetRel.replace(/^\.\//, ''));
+    const assetPath = path.join(distDir, assetRel.replace(/^\.\//, ''));
     const webviewUri = webview.asWebviewUri(vscode.Uri.file(assetPath));
     return `${attr}="${webviewUri}"`;
   });
@@ -116,7 +116,7 @@ function buildHtml(webview, distDir, n) {
     // Stylesheets from Google Fonts API
     `style-src-elem 'unsafe-inline' ${webview.cspSource} https://fonts.googleapis.com`,
     // API calls to local FastAPI server
-    `connect-src ${API_BASE} ws://127.0.0.1:8000`,
+    `connect-src ${API_BASE} ws://127.0.0.1:8000 http://localhost:8000 ws://localhost:8000`,
     // Allow data: URIs for image attachments
     `img-src ${webview.cspSource} data: blob:`,
   ].join('; ');
@@ -137,8 +137,8 @@ class CodingAgentViewProvider {
    * @param {vscode.ExtensionContext} ctx
    */
   constructor(ctx) {
-    this._ctx      = ctx;
-    this._view     = undefined;  // the live WebviewView, if resolved
+    this._ctx = ctx;
+    this._view = undefined;  // the live WebviewView, if resolved
   }
 
   /**
@@ -216,11 +216,11 @@ class CodingAgentViewProvider {
  */
 function resolvePython(repoRoot) {
   // Windows: .venv\Scripts\python.exe
-  const winPy  = path.join(repoRoot, '.venv', 'Scripts', 'python.exe');
+  const winPy = path.join(repoRoot, '.venv', 'Scripts', 'python.exe');
   // Unix:    .venv/bin/python
-  const unixPy = path.join(repoRoot, '.venv', 'bin',     'python');
+  const unixPy = path.join(repoRoot, '.venv', 'bin', 'python');
 
-  if (fs.existsSync(winPy))  return winPy;
+  if (fs.existsSync(winPy)) return winPy;
   if (fs.existsSync(unixPy)) return unixPy;
 
   // Fallback — let the shell find it
@@ -239,22 +239,22 @@ function startApiInTerminal(repoRoot) {
   // Check whether a terminal for the API is already running
   const existing = vscode.window.terminals.find(t => t.name === 'Coding Agent API');
   if (existing) {
-    existing.show();
+    existing.show(false);
     vscode.window.showInformationMessage(
-      'AI Coding Agent: API terminal is already open.',
+      'AI Coding Agent: API terminal is already open. If the server stopped, type: python -m uvicorn interfaces.api_server:app --port 8000 --reload',
     );
     return;
   }
 
   const terminal = vscode.window.createTerminal({
     name: 'Coding Agent API',
-    cwd:  repoRoot,
+    cwd: repoRoot,
   });
-  terminal.show();
+  terminal.show(false);
 
-  // Use the venv Python to run uvicorn so we don't rely on it being on PATH.
-  const cmd = `"${python}" -m uvicorn interfaces.api_server:app --host 127.0.0.1 --port 8000 --reload`;
-  terminal.sendText(cmd);
+  // Use & "path/to/python.exe" syntax which works cleanly across PowerShell and CMD
+  const cmd = `& "${python}" -m uvicorn interfaces.api_server:app --host 127.0.0.1 --port 8000 --reload`;
+  terminal.sendText(cmd, true);
 
   vscode.window.showInformationMessage(
     `AI Coding Agent: API server starting on ${API_BASE} …`,
