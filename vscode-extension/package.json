@@ -1,0 +1,62 @@
+{
+  "name": "coding-agent",
+  "displayName": "AI Coding Agent",
+  "description": "Embedded AI Coding Agent with HITL guardrail — runs the local FastAPI backend and renders the React UI inside a VS Code sidebar panel.",
+  "version": "0.1.0",
+  "publisher": "Muditshrivastav",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["AI", "Other"],
+  "icon": "images/icon.png",
+  "main": "./extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codingAgentContainer",
+          "title": "AI Coding Agent",
+          "icon": "images/sidebar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "codingAgentContainer": [
+        {
+          "type": "webview",
+          "id": "codingAgent.ui",
+          "name": "Agent Chat",
+          "icon": "images/sidebar-icon.svg",
+          "contextualTitle": "AI Coding Agent"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "codingAgent.startApi",
+        "title": "AI Coding Agent: Start API Server",
+        "icon": "$(play)"
+      },
+      {
+        "command": "codingAgent.openUi",
+        "title": "AI Coding Agent: Open UI Panel",
+        "icon": "$(layout-sidebar-right)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        { "command": "codingAgent.startApi" },
+        { "command": "codingAgent.openUi" }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "echo 'No bundling required'",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.0.0"
+  }
+}

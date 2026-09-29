@@ -783,3 +783,52 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.2);
 }
+
+/* ─── Narrow-screen / VS Code sidebar webview ──────────────────────────────
+   When the container is ≤ 520 px (i.e. inside a VS Code sidebar panel) the
+   three-column layout collapses: hide the session sidebar and the workspace
+   panel so the chat occupies 100 % of the available width.
+   ────────────────────────────────────────────────────────────────────────── */
+@media (max-width: 520px) {
+  /* Force the body / root to fill whatever width VS Code gives us */
+  html, body, #root {
+    overflow: hidden;
+    width: 100%;
+  }
+
+  /* Hide left session sidebar completely */
+  .sidebar {
+    display: none;
+  }
+
+  /* Hide right workspace / code explorer panel completely */
+  .workspace-panel {
+    display: none;
+  }
+
+  /* Chat column fills the whole width */
+  .main-stage {
+    width: 100%;
+    min-width: 0;
+  }
+
+  /* Reduce wide chat padding to something that fits a narrow view */
+  .chat-scroll {
+    padding: 12px 8px;
+  }
+
+  .input-dock {
+    padding: 10px 8px;
+  }
+
+  /* Tighten the stage header */
+  .stage-header {
+    padding: 0 10px;
+  }
+
+  /* Stack badges vertically if they overflow */
+  .stage-title-wrap {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+}

@@ -150,6 +150,13 @@ async def run_stdio_jsonrpc(harness: Any, root_dir: str) -> None:
         response: dict[str, Any] = {"jsonrpc": "2.0", "id": msg_id}
 
         if method == "initialize":
+            tool_definitions = [
+                {
+                    "name": getattr(t, "name", str(t)),
+                    "description": getattr(t, "description", ""),
+                }
+                for t in getattr(harness, "_tools", [])
+            ]
             response["result"] = {
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
@@ -158,13 +165,23 @@ async def run_stdio_jsonrpc(harness: Any, root_dir: str) -> None:
                 },
                 "capabilities": {
                     "workspace": {"rootDir": root_dir, "rootUri": Path(root_dir).as_uri()},
-                    "tools": {},
+                    "tools": {"list": tool_definitions},
                     "prompts": {},
                 },
             }
         elif method in ("session/new", "session/initialize"):
             thread_id = params.get("threadId") or params.get("sessionId") or str(uuid.uuid4())
             response["result"] = {"sessionId": thread_id, "root_dir": root_dir}
+        elif method in ("tools/list", "tool/list"):
+            response["result"] = {
+                "tools": [
+                    {
+                        "name": getattr(t, "name", str(t)),
+                        "description": getattr(t, "description", ""),
+                    }
+                    for t in getattr(harness, "_tools", [])
+                ]
+            }
         elif method in ("session/prompt", "agent/prompt", "chat", "message"):
             prompt = (
                 params.get("prompt")
@@ -210,10 +227,13 @@ async def run_interactive_terminal(harness: Any, root_dir: str) -> None:
     except Exception:
         api_online = False
 
+    tool_names = [getattr(t, "name", str(t)) for t in getattr(harness, "_tools", [])]
+
     print("\n" + "=" * 66)
     print("🤖  Coding Agent Harness — VS Code Direct Workspace Mode")
     print(f"📂  Target Root: {root_dir}")
     print("⚡  Sandbox: Local Host (writes code directly into files)")
+    print(f"🛠️   Tools Loaded ({len(tool_names)}): {', '.join(tool_names[:6])}...")
     if api_online:
         print("🔗  UI Link: Connected to http://localhost:8000 (Live sync active)")
         print("🖥️  Frontend: Open http://localhost:5173 to watch runs live")
@@ -259,9 +279,12 @@ async def main() -> None:
 
     from agent.core import CodingAgentHarness
 
+    # Initialize harness with tools=None so it automatically loads all tools:
+    # deploy tools, verification tools, API suite (Tavily, GitHub, Supabase, Render, Groq, LangSmith),
+    # and Neo4j GraphRAG tools.
     harness = CodingAgentHarness(
         root_dir=root_dir,
-        tools=[],
+        tools=None,
         # Run directly on the host shell — writes code straight to the workspace.
         sandbox_mode="local",
     )
