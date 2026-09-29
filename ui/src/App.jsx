@@ -55,16 +55,19 @@ export default function App() {
   const [selectedFile, setSelectedFile] = useState(null)
   const [fileContent, setFileContent] = useState('')
   const [logs, setLogs] = useState([])
+  const [workspaceInfo, setWorkspaceInfo] = useState(null) // { workspace_root, workspace_name }
 
   const chatEndRef = useRef(null)
 
   useEffect(() => {
     fetchSessions()
     fetchFiles()
+    fetchWorkspaceInfo()
     const interval = setInterval(() => {
       fetchSessions()
       fetchFiles()
-    }, 2500)
+      fetchWorkspaceInfo()
+    }, 3000)
     return () => clearInterval(interval)
   }, [])
 
@@ -83,6 +86,19 @@ export default function App() {
   }, [messages, pendingApproval])
 
   // --- Session Management ---
+  const fetchWorkspaceInfo = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/workspace`)
+      if (res.ok) {
+        const data = await res.json()
+        setWorkspaceInfo(prev => {
+          if (prev?.workspace_root === data.workspace_root) return prev
+          return data
+        })
+      }
+    } catch (_) {}
+  }
+
   const fetchSessions = async () => {
     try {
       const res = await fetch(`${API_BASE}/sessions`)
@@ -347,12 +363,19 @@ export default function App() {
         return
       }
       const isFetchFail = err.message && err.message.toLowerCase().includes('fetch')
+      if (isFetchFail) {
+        // Auto-request VS Code extension host to boot the API server immediately
+        try {
+          if (typeof window !== 'undefined' && window.acquireVsCodeApi) {
+            window.vscodeApi = window.vscodeApi || window.acquireVsCodeApi();
+            window.vscodeApi?.postMessage({ command: 'startApi' });
+          }
+        } catch (_) {}
+      }
       const errorText = isFetchFail
         ? `⚠️ **Backend Server Offline:** Could not reach the API at \`${API_BASE}\`.\n\n` +
-          `Please make sure the API server is running:\n` +
-          `1. Open a terminal in the project root\n` +
-          `2. Run: \`& ".\\.venv\\Scripts\\python.exe" -m uvicorn interfaces.api_server:app --port 8000 --reload\`\n` +
-          `*(Or press \`Ctrl+Shift+P\` → \`AI Coding Agent: Start API Server\`)*`
+          `Starting the server automatically now… Please wait a few seconds and try sending again!\n` +
+          `*(If needed, run manually: \`Ctrl+Shift+P\` → \`AI Coding Agent: Start API Server\`)*`
         : `⚠️ **Request Execution Error:** ${err.message}`
 
       setMessages(prev => [
@@ -560,6 +583,14 @@ export default function App() {
           </div>
 
           <div className="stage-actions">
+            {workspaceInfo && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: 'var(--text-dim)', padding: '3px 8px', background: 'rgba(255,255,255,0.04)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                <Folder size={12} style={{ color: 'var(--accent-amber)' }} />
+                <span style={{ maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={workspaceInfo.workspace_root}>
+                  {workspaceInfo.workspace_name}
+                </span>
+              </div>
+            )}
             <button
               className={`action-btn ${rightPanelTab === 'files' ? 'active' : ''}`}
               onClick={() => setRightPanelTab(rightPanelTab === 'files' ? null : 'files')}
@@ -758,9 +789,20 @@ export default function App() {
           <div className="panel-content">
             {!selectedFile ? (
               <div>
-                <div style={{ fontSize: '11px', color: 'var(--text-dim)', padding: '4px 6px', fontWeight: 600, textTransform: 'uppercase' }}>
-                  Workspace Files
+                <div style={{ fontSize: '11px', color: 'var(--text-dim)', padding: '4px 6px 2px', fontWeight: 600, textTransform: 'uppercase' }}>
+                  Explorer
                 </div>
+                {workspaceInfo && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '3px 6px 6px', fontSize: '11px', color: 'var(--accent-amber)', borderBottom: '1px solid rgba(255,255,255,0.05)', marginBottom: '4px' }}>
+                    <FolderOpen size={12} />
+                    <span
+                      style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'default' }}
+                      title={workspaceInfo.workspace_root}
+                    >
+                      {workspaceInfo.workspace_name}
+                    </span>
+                  </div>
+                )}
                 {renderFileTree(files)}
               </div>
             ) : (

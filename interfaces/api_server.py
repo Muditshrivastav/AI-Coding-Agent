@@ -56,10 +56,15 @@ class ResumeRequest(BaseModel):
 @app.on_event("startup")
 async def startup_event() -> None:
     global harness
+    # Log the env var explicitly so it's visible in the uvicorn terminal
+    agent_root_env = os.environ.get("AGENT_ROOT_DIR", "<not set>")
+    vscode_cwd_env = os.environ.get("VSCODE_CWD", "<not set>")
+    logger.info(f"🔑 AGENT_ROOT_DIR = {agent_root_env}")
+    logger.info(f"🔑 VSCODE_CWD     = {vscode_cwd_env}")
     try:
         from agent.core import CodingAgentHarness
         root_dir = resolve_workspace_root()
-        logger.info(f"🗂️  Agent workspace root: {root_dir}")
+        logger.info(f"🗂️  Agent workspace root resolved to: {root_dir}")
         harness = CodingAgentHarness(root_dir=root_dir, tools=[], sandbox_mode="local")
         logger.info("✅ CodingAgentHarness initialized successfully (sandbox_mode=local).")
     except Exception as exc:
@@ -73,12 +78,65 @@ async def startup_event() -> None:
 async def health_check() -> dict[str, Any]:
     global harness
     root = harness.root_dir if harness else resolve_workspace_root()
-    import os
     return {
-        "status": "ok",
+        "status": "ok" if harness else "degraded",
         "workspace_root": root,
         "workspace_name": os.path.basename(root) or root,
+        "agent_root_env": os.environ.get("AGENT_ROOT_DIR", ""),
     }
+
+
+class SetWorkspaceRequest(BaseModel):
+    root_dir: str
+
+
+@app.get("/workspace")
+async def get_workspace() -> dict[str, Any]:
+    """Return the currently active workspace root and env diagnostics."""
+    global harness
+    root = harness.root_dir if harness else resolve_workspace_root()
+    return {
+        "workspace_root": root,
+        "workspace_name": os.path.basename(root) or root,
+        "agent_root_env": os.environ.get("AGENT_ROOT_DIR", ""),
+        "vscode_cwd_env": os.environ.get("VSCODE_CWD", ""),
+        "process_cwd": os.getcwd(),
+    }
+
+
+@app.post("/workspace/set")
+async def set_workspace(req: SetWorkspaceRequest) -> dict[str, Any]:
+    """Hot-swap the agent workspace root without restarting uvicorn.
+
+    Sets AGENT_ROOT_DIR in the process environment so resolve_workspace_root()
+    picks it up, then reinitialises CodingAgentHarness with the new path.
+    Existing sessions remain in the session store but new runs will use
+    the new root_dir.
+    """
+    global harness
+    import os as _os
+    new_root = _os.path.abspath(req.root_dir)
+    if not _os.path.isdir(new_root):
+        raise HTTPException(status_code=400, detail=f"Directory not found: {new_root}")
+
+    # Propagate into process env so reload-triggered workers also see it
+    _os.environ["AGENT_ROOT_DIR"] = new_root
+    _os.environ["VSCODE_CWD"] = ""  # clear interfering var
+
+    try:
+        from agent.core import CodingAgentHarness
+        harness = CodingAgentHarness(root_dir=new_root, tools=[], sandbox_mode="local")
+        logger.info(f"🔄 Workspace hot-swapped → {new_root}")
+        return {
+            "status": "ok",
+            "workspace_root": new_root,
+            "workspace_name": _os.path.basename(new_root) or new_root,
+        }
+    except Exception as exc:
+        import traceback
+        logger.error(f"❌ Workspace set failed: {exc}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 
 # ---------------------------------------------------------------------------

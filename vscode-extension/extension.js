@@ -36,10 +36,33 @@ const API_BASE = 'http://127.0.0.1:8000';
 
 /**
  * Return the absolute path to the built React app's index.html.
- * The dist/ folder lives at  <extension-root>/../ui/dist/  so the extension
- * doesn't need to bundle the React code itself.
+ * Looks in:
+ * 1. Bundled dist inside extension: <extensionPath>/dist
+ * 2. Development sibling path: <extensionPath>/../ui/dist
+ * 3. Open workspace folders: <workspace>/ui/dist
+ * 4. Known project path: D:\Machine Learning\AI Coding Agent\ui\dist
  */
 function getDistDir(/** @type {vscode.ExtensionContext} */ ctx) {
+  const candidates = [
+    path.join(ctx.extensionPath, 'dist'),
+    path.join(ctx.extensionPath, 'ui', 'dist'),
+    path.join(ctx.extensionPath, '..', 'ui', 'dist'),
+    'd:\\Machine Learning\\AI Coding Agent\\ui\\dist',
+  ];
+
+  const folders = vscode.workspace.workspaceFolders || [];
+  for (const folder of folders) {
+    candidates.push(path.join(folder.uri.fsPath, 'ui', 'dist'));
+    candidates.push(path.join(folder.uri.fsPath, 'AI Coding Agent', 'ui', 'dist'));
+  }
+
+  for (const c of candidates) {
+    if (fs.existsSync(path.join(c, 'index.html'))) {
+      return c;
+    }
+  }
+
+  // Fallback to default
   return path.join(ctx.extensionPath, '..', 'ui', 'dist');
 }
 
@@ -168,10 +191,15 @@ class CodingAgentViewProvider {
     const n = nonce();
     webviewView.webview.html = buildHtml(webviewView.webview, distDir, n);
 
+    // ── Automatically ensure the FastAPI backend is running whenever UI opens ──
+    const repoRoot = resolveRepoRoot(this._ctx);
+    ensureApiRunning(repoRoot, /* silent */ true);
+
     // ── Rebuild HTML when the view becomes visible again ─────────────────
     // (handles the case where the dist/ folder was updated while VS Code ran)
     webviewView.onDidChangeVisibility(() => {
       if (webviewView.visible) {
+        ensureApiRunning(repoRoot, /* silent */ true);
         const n2 = nonce();
         webviewView.webview.html = buildHtml(webviewView.webview, distDir, n2);
       }
@@ -215,6 +243,10 @@ function resolveRepoRoot(ctx) {
   const candidate1 = path.resolve(ctx.extensionPath, '..');
   if (fs.existsSync(path.join(candidate1, 'interfaces', 'api_server.py'))) {
     return candidate1;
+  }
+  const knownProject = 'd:\\Machine Learning\\AI Coding Agent';
+  if (fs.existsSync(path.join(knownProject, 'interfaces', 'api_server.py'))) {
+    return knownProject;
   }
   const folders = vscode.workspace.workspaceFolders || [];
   for (const folder of folders) {
@@ -261,23 +293,69 @@ function killApiTerminal() {
 }
 
 /**
+ * Check whether the API server is currently responding on http://127.0.0.1:8000.
+ * @returns {Promise<boolean>}
+ */
+function isApiAlive() {
+  return new Promise((resolve) => {
+    const http = require('http');
+    const req = http.get('http://127.0.0.1:8000/health', { timeout: 1500 }, (res) => {
+      res.resume();
+      resolve(res.statusCode === 200);
+    });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
+}
+
+/**
+ * Ensure the API server is running without asking the user.
+ * If the API is already alive or terminal is running, does nothing.
+ * Otherwise, automatically starts it in the terminal.
+ *
+ * @param {string} repoRoot
+ * @param {boolean} silent
+ */
+async function ensureApiRunning(repoRoot, silent = true) {
+  const alive = await isApiAlive();
+  if (alive) {
+    const targetWorkspace = getTargetWorkspace() || repoRoot;
+    notifyServerOfWorkspace(targetWorkspace);
+    return;
+  }
+
+  const existing = vscode.window.terminals.find(t => t.name === 'Coding Agent API');
+  if (existing) {
+    return;
+  }
+
+  startApiInTerminal(repoRoot, false, silent);
+}
+
+/**
  * Launch `uvicorn interfaces.api_server:app` using the repo's .venv Python.
  * Sets AGENT_ROOT_DIR to the active open workspace folder (e.g. google-adk).
  *
  * @param {string} repoRoot      - Absolute path to the AI Coding Agent repo (where api_server.py lives).
  * @param {boolean} forceRestart - If true, kill any existing API terminal before starting.
+ * @param {boolean} silent       - If true, do not pop an info message.
  */
-function startApiInTerminal(repoRoot, forceRestart = false) {
+function startApiInTerminal(repoRoot, forceRestart = false, silent = false) {
   const python = resolvePython(repoRoot);
   const targetWorkspace = getTargetWorkspace() || repoRoot;
 
   // Check whether a terminal for the API is already running
   const existing = vscode.window.terminals.find(t => t.name === 'Coding Agent API');
   if (existing && !forceRestart) {
-    existing.show(false);
-    vscode.window.showInformationMessage(
-      'AI Coding Agent: API terminal is already open. Check the terminal panel at the bottom of VS Code.',
-    );
+    if (!silent) {
+      existing.show(false);
+      vscode.window.showInformationMessage(
+        'AI Coding Agent: API terminal is already open. Check the terminal panel at the bottom of VS Code.',
+      );
+    }
     return;
   }
 
@@ -305,9 +383,58 @@ function startApiInTerminal(repoRoot, forceRestart = false) {
   const cmd = `& "${python}" -m uvicorn interfaces.api_server:app --host 127.0.0.1 --port 8000 --reload`;
   terminal.sendText(cmd, true);
 
-  vscode.window.showInformationMessage(
-    `AI Coding Agent: Starting API → workspace: ${vscode.workspace.name || targetWorkspace}`,
-  );
+  // After uvicorn boots, push the correct workspace to the /workspace/set endpoint.
+  // This guarantees the harness uses the right root even if AGENT_ROOT_DIR was
+  // shadowed by VSCODE_CWD or a stale --reload worker.
+  notifyServerOfWorkspace(targetWorkspace);
+
+  if (!silent) {
+    vscode.window.showInformationMessage(
+      `AI Coding Agent: Starting API → workspace: ${vscode.workspace.name || targetWorkspace}`,
+    );
+  }
+}
+
+/**
+ * Retry POST /workspace/set until the server accepts it (handles slow startup).
+ * @param {string} targetWorkspace
+ * @param {number} maxRetries
+ */
+function notifyServerOfWorkspace(targetWorkspace, maxRetries = 20) {
+  let attempts = 0;
+
+  async function trySet() {
+    attempts++;
+    try {
+      const http = require('http');
+      const body = JSON.stringify({ root_dir: targetWorkspace });
+      await new Promise((resolve, reject) => {
+        const req = http.request(
+          { hostname: '127.0.0.1', port: 8000, path: '/workspace/set', method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } },
+          (res) => {
+            res.resume();
+            if (res.statusCode === 200) resolve(true);
+            else reject(new Error(`HTTP ${res.statusCode}`));
+          },
+        );
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+      });
+      // Success
+      console.log(`[AI Coding Agent] Workspace set to: ${targetWorkspace}`);
+    } catch (_err) {
+      if (attempts < maxRetries) {
+        setTimeout(trySet, 2000);
+      } else {
+        console.warn(`[AI Coding Agent] Could not set workspace after ${maxRetries} attempts.`);
+      }
+    }
+  }
+
+  // First attempt after 4 s — uvicorn typically needs 2-3 s to start
+  setTimeout(trySet, 4000);
 }
 
 // ─── Extension entry points ──────────────────────────────────────────────────
@@ -317,6 +444,9 @@ function startApiInTerminal(repoRoot, forceRestart = false) {
  */
 function activate(ctx) {
   const repoRoot = resolveRepoRoot(ctx);
+
+  // ── Auto-start API quietly whenever the extension activates ──────────────
+  ensureApiRunning(repoRoot, /* silent */ true);
 
   // ── Register the WebviewViewProvider ────────────────────────────────────
   const provider = new CodingAgentViewProvider(ctx);
@@ -331,7 +461,7 @@ function activate(ctx) {
   // ── Command: start the FastAPI server ────────────────────────────────────
   ctx.subscriptions.push(
     vscode.commands.registerCommand('codingAgent.startApi', () => {
-      startApiInTerminal(repoRoot);
+      startApiInTerminal(repoRoot, /* forceRestart */ true);
     }),
   );
 
@@ -339,6 +469,8 @@ function activate(ctx) {
   ctx.subscriptions.push(
     vscode.commands.registerCommand('codingAgent.openUi', () => {
       provider.focus();
+      // Ensure API is running when opening UI
+      ensureApiRunning(repoRoot, /* silent */ true);
       // VS Code built-in command to open and focus the view container
       vscode.commands.executeCommand(`${VIEW_ID}.focus`);
     }),
@@ -354,28 +486,13 @@ function activate(ctx) {
 
       const apiTerminal = vscode.window.terminals.find(t => t.name === 'Coding Agent API');
       if (apiTerminal) {
-        // Only restart if the API is already running
-        vscode.window.showInformationMessage(
-          `AI Coding Agent: Workspace changed to "${vscode.workspace.name}". Restarting API server…`,
-          'Restart Now',
-        ).then(choice => {
-          if (choice === 'Restart Now') {
-            startApiInTerminal(repoRoot, /* forceRestart */ true);
-          }
-        });
+        // Automatically restart so the API switches to the new workspace
+        startApiInTerminal(repoRoot, /* forceRestart */ true, /* silent */ true);
+      } else {
+        notifyServerOfWorkspace(newWorkspace);
       }
     }),
   );
-
-  // Auto-start convenience: notify the user they can launch the API
-  vscode.window.showInformationMessage(
-    'AI Coding Agent extension activated. Use the sidebar icon or run "AI Coding Agent: Start API Server".',
-    'Start API',
-  ).then(choice => {
-    if (choice === 'Start API') {
-      startApiInTerminal(repoRoot);
-    }
-  });
 }
 
 function deactivate() {
