@@ -208,10 +208,26 @@ class CodingAgentViewProvider {
 // ─── API Server launcher ──────────────────────────────────────────────────────
 
 /**
- * Resolve the Python interpreter inside the repo's .venv.
- * Falls back to the system "python" / "python3" if .venv doesn't exist.
- *
- * @param {string} repoRoot — absolute path to the repository root
+ * @param {vscode.ExtensionContext} ctx
+ * @returns {string}
+ */
+function resolveRepoRoot(ctx) {
+  const candidate1 = path.resolve(ctx.extensionPath, '..');
+  if (fs.existsSync(path.join(candidate1, 'interfaces', 'api_server.py'))) {
+    return candidate1;
+  }
+  const folders = vscode.workspace.workspaceFolders || [];
+  for (const folder of folders) {
+    const candidate = folder.uri.fsPath;
+    if (fs.existsSync(path.join(candidate, 'interfaces', 'api_server.py'))) {
+      return candidate;
+    }
+  }
+  return candidate1;
+}
+
+/**
+ * @param {string} repoRoot
  * @returns {string}
  */
 function resolvePython(repoRoot) {
@@ -223,7 +239,6 @@ function resolvePython(repoRoot) {
   if (fs.existsSync(winPy)) return winPy;
   if (fs.existsSync(unixPy)) return unixPy;
 
-  // Fallback — let the shell find it
   return process.platform === 'win32' ? 'python' : 'python3';
 }
 
@@ -241,7 +256,7 @@ function startApiInTerminal(repoRoot) {
   if (existing) {
     existing.show(false);
     vscode.window.showInformationMessage(
-      'AI Coding Agent: API terminal is already open. If the server stopped, type: python -m uvicorn interfaces.api_server:app --port 8000 --reload',
+      'AI Coding Agent: API terminal is already open. Check the terminal panel at the bottom of VS Code.',
     );
     return;
   }
@@ -252,12 +267,13 @@ function startApiInTerminal(repoRoot) {
   });
   terminal.show(false);
 
-  // Use & "path/to/python.exe" syntax which works cleanly across PowerShell and CMD
+  // Switch directory explicitly and run uvicorn
+  terminal.sendText(`cd "${repoRoot}"`, true);
   const cmd = `& "${python}" -m uvicorn interfaces.api_server:app --host 127.0.0.1 --port 8000 --reload`;
   terminal.sendText(cmd, true);
 
   vscode.window.showInformationMessage(
-    `AI Coding Agent: API server starting on ${API_BASE} …`,
+    `AI Coding Agent: Launching API server in terminal at ${repoRoot} …`,
   );
 }
 
@@ -267,27 +283,7 @@ function startApiInTerminal(repoRoot) {
  * @param {vscode.ExtensionContext} ctx
  */
 function activate(ctx) {
-  // Determine the repo root: prefer the first workspace folder that contains
-  // the known .venv directory; fall back to extensionPath/../
-  let repoRoot = path.join(ctx.extensionPath, '..');
-  const folders = vscode.workspace.workspaceFolders;
-  if (folders && folders.length > 0) {
-    // Prefer the workspace folder that actually contains our repo
-    for (const folder of folders) {
-      const candidate = folder.uri.fsPath;
-      if (
-        fs.existsSync(path.join(candidate, '.venv')) ||
-        fs.existsSync(path.join(candidate, 'interfaces', 'api_server.py'))
-      ) {
-        repoRoot = candidate;
-        break;
-      }
-    }
-    // If none matched specifically, default to first folder
-    if (repoRoot === path.join(ctx.extensionPath, '..')) {
-      repoRoot = folders[0].uri.fsPath;
-    }
-  }
+  const repoRoot = resolveRepoRoot(ctx);
 
   // ── Register the WebviewViewProvider ────────────────────────────────────
   const provider = new CodingAgentViewProvider(ctx);

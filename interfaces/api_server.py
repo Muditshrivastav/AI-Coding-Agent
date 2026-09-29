@@ -114,9 +114,11 @@ async def get_session_details(thread_id: str) -> dict[str, Any]:
     from dataclasses import asdict
     meta = harness.sessions.get_session(thread_id)
     state = await harness.get_state(thread_id)
+    messages = harness.sessions.get_messages(thread_id)
     return {
         "session": asdict(meta) if meta else None,
         "state": state,
+        "messages": messages,
     }
 
 
@@ -131,6 +133,11 @@ async def delete_session(thread_id: str) -> dict[str, Any]:
     return {"thread_id": thread_id, "deleted": deleted}
 
 
+import asyncio
+
+active_run_tasks: dict[str, asyncio.Task] = {}
+
+
 @app.post("/runs")
 async def start_run(req: RunRequest) -> dict[str, Any]:
     global harness
@@ -138,8 +145,48 @@ async def start_run(req: RunRequest) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Harness not initialized.")
 
     thread_id = req.thread_id or str(uuid.uuid4())
-    result = await harness.run(req.user_request, thread_id=thread_id, model=req.model)
-    return {"thread_id": thread_id, **result}
+    
+    # Persist the user message immediately into session storage
+    harness.sessions.save_message(thread_id, sender="user", text=req.user_request)
+
+    # Run harness.run in an asyncio Task so it can be cancelled on request
+    task = asyncio.create_task(
+        harness.run(req.user_request, thread_id=thread_id, model=req.model)
+    )
+    active_run_tasks[thread_id] = task
+
+    try:
+        result = await task
+        # Extract agent response text and save to persistent session storage
+        output_text = (
+            result.get("output")
+            or result.get("response")
+            or (str(result.get("result")) if result.get("result") else None)
+            or "Task completed."
+        )
+        if result.get("status") != "awaiting_approval":
+            harness.sessions.save_message(thread_id, sender="agent", text=output_text)
+        return {"thread_id": thread_id, **result}
+    except asyncio.CancelledError:
+        logger.info(f"🛑 Run on thread {thread_id} was cancelled by user.")
+        harness.sessions.save_message(thread_id, sender="agent", text="🛑 Execution stopped by user.")
+        return {
+            "thread_id": thread_id,
+            "status": "stopped",
+            "output": "🛑 Execution stopped by user.",
+        }
+    finally:
+        active_run_tasks.pop(thread_id, None)
+
+
+@app.post("/runs/{thread_id}/stop")
+async def stop_run(thread_id: str) -> dict[str, Any]:
+    """Stops/cancels an in-flight agent model execution."""
+    task = active_run_tasks.get(thread_id)
+    if task and not task.done():
+        task.cancel()
+        return {"thread_id": thread_id, "status": "stopping", "message": "Execution cancellation requested."}
+    return {"thread_id": thread_id, "status": "not_running", "message": "No active task found for thread."}
 
 
 @app.get("/runs/{thread_id}")
@@ -148,9 +195,10 @@ async def get_run_status(thread_id: str) -> dict[str, Any]:
     if harness is None:
         raise HTTPException(status_code=500, detail="Harness not initialized.")
 
-    state = await harness.get_state(thread_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found.")
+    state = await harness.get_state(thread_id) or {}
+    messages = harness.sessions.get_messages(thread_id)
+    if "messages" not in state or not state["messages"]:
+        state["messages"] = messages
     return state
 
 

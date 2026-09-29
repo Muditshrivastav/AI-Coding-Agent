@@ -5,6 +5,7 @@ import {
   ShieldAlert,
   CheckCircle2,
   XCircle,
+  Square,
   Plus,
   Trash2,
   FolderTree,
@@ -205,12 +206,15 @@ export default function App() {
       if (res.ok) {
         const state = await res.json()
         if (state && state.messages && state.messages.length > 0) {
-          // Map LangGraph state messages
+          // Map messages whether returned from LangGraph or persistent session JSON
           const mapped = state.messages.map((m, idx) => ({
-            id: `msg-${idx}`,
-            sender: (m.type === 'human' || m.role === 'user') ? 'user' : 'agent',
-            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            text: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+            id: m.id || `msg-${idx}`,
+            sender: m.sender || (m.type === 'human' || m.role === 'user' ? 'user' : 'agent'),
+            time: m.time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            text: typeof m.text === 'string'
+              ? m.text
+              : (typeof m.content === 'string' ? m.content : JSON.stringify(m.content || m)),
+            attachments: m.attachments || [],
           }))
           setMessages(prev => {
             if (prev.length !== mapped.length) return mapped
@@ -236,10 +240,42 @@ export default function App() {
     }
   }
 
+  const runAbortControllerRef = useRef(null)
+
+  // --- Stop In-Flight Run ---
+  const handleStopRun = async () => {
+    if (!isRunning) return
+    try {
+      if (runAbortControllerRef.current) {
+        runAbortControllerRef.current.abort()
+      }
+      if (activeSessionId) {
+        await fetch(`${API_BASE}/runs/${activeSessionId}/stop`, { method: 'POST' })
+      }
+    } catch (e) {
+      console.warn('Failed to dispatch stop request', e)
+    } finally {
+      setIsRunning(false)
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `stop-${Date.now()}`,
+          sender: 'agent',
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          text: '🛑 **Execution stopped by user.**',
+        },
+      ])
+    }
+  }
+
   // --- Run Execution & HITL Guard ---
   const handleSendMessage = async (e) => {
     e?.preventDefault()
-    if ((!prompt.trim() && attachments.length === 0) || isRunning) return
+    if (isRunning) {
+      handleStopRun()
+      return
+    }
+    if (!prompt.trim() && attachments.length === 0) return
 
     const rawPrompt = prompt
     const currentAttachments = [...attachments]
@@ -271,10 +307,14 @@ export default function App() {
     setMessages(prev => [...prev, userMsg])
     setIsRunning(true)
 
+    const controller = new AbortController()
+    runAbortControllerRef.current = controller
+
     try {
       const res = await fetch(`${API_BASE}/runs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           user_request: finalPrompt,
           thread_id: activeSessionId,
@@ -303,13 +343,25 @@ export default function App() {
       fetchFiles()
     } catch (err) {
       setIsRunning(false)
+      if (err.name === 'AbortError') {
+        return
+      }
+      const isFetchFail = err.message && err.message.toLowerCase().includes('fetch')
+      const errorText = isFetchFail
+        ? `⚠️ **Backend Server Offline:** Could not reach the API at \`${API_BASE}\`.\n\n` +
+          `Please make sure the API server is running:\n` +
+          `1. Open a terminal in the project root\n` +
+          `2. Run: \`& ".\\.venv\\Scripts\\python.exe" -m uvicorn interfaces.api_server:app --port 8000 --reload\`\n` +
+          `*(Or press \`Ctrl+Shift+P\` → \`AI Coding Agent: Start API Server\`)*`
+        : `⚠️ **Request Execution Error:** ${err.message}`
+
       setMessages(prev => [
         ...prev,
         {
           id: `err-${Date.now()}`,
           sender: 'agent',
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          text: `⚠️ **Request Execution Error:** ${err.message}`,
+          text: errorText,
         },
       ])
     }
@@ -664,12 +716,17 @@ export default function App() {
               </div>
 
               <button
-                type="submit"
-                className="send-btn"
-                disabled={(!prompt.trim() && attachments.length === 0) || isRunning}
-                title="Send Command"
+                type={isRunning ? 'button' : 'submit'}
+                className={`send-btn ${isRunning ? 'stop-btn' : ''}`}
+                onClick={isRunning ? handleStopRun : undefined}
+                disabled={!isRunning && !prompt.trim() && attachments.length === 0}
+                title={isRunning ? 'Stop Execution' : 'Send Command'}
               >
-                <Play size={14} fill="currentColor" />
+                {isRunning ? (
+                  <Square size={13} fill="currentColor" />
+                ) : (
+                  <Play size={14} fill="currentColor" />
+                )}
               </button>
             </div>
           </form>

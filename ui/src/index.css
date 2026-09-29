@@ -658,6 +658,17 @@ body {
   box-shadow: 0 0 10px rgba(255, 255, 255, 0.15);
 }
 
+.send-btn.stop-btn {
+  background: linear-gradient(135deg, #ef4444, #b91c1c);
+  border-color: rgba(239, 68, 68, 0.4);
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.35);
+}
+
+.send-btn.stop-btn:hover {
+  background: linear-gradient(135deg, #f87171, #dc2626);
+  box-shadow: 0 0 16px rgba(239, 68, 68, 0.6);
+}
+
 .send-btn:disabled {
   opacity: 0.35;
   cursor: not-allowed;

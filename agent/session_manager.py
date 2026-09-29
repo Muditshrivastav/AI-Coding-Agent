@@ -124,10 +124,49 @@ class SessionManager:
         self._save()
         return meta
 
+    def _get_messages_path(self, session_id: str) -> Path:
+        return self._storage_dir / f"{session_id}_messages.json"
+
+    def get_messages(self, session_id: str) -> list[dict[str, Any]]:
+        """Retrieve stored chat history for a session."""
+        msg_file = self._get_messages_path(session_id)
+        if not msg_file.exists():
+            return []
+        try:
+            with open(msg_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+
+    def save_message(self, session_id: str, sender: str, text: str, attachments: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        """Append a message to the persistent session file."""
+        messages = self.get_messages(session_id)
+        msg = {
+            "id": f"msg-{len(messages) + 1}-{int(datetime.now().timestamp() * 1000)}",
+            "sender": sender,
+            "text": text,
+            "time": datetime.now().strftime("%I:%M %p"),
+            "attachments": attachments or [],
+        }
+        messages.append(msg)
+        try:
+            with open(self._get_messages_path(session_id), "w", encoding="utf-8") as f:
+                json.dump(messages, f, indent=2)
+            self.update_session(session_id, increment_messages=True)
+        except Exception:
+            pass
+        return msg
+
     def delete_session(self, session_id: str) -> bool:
-        """Delete a session from the registry."""
+        """Delete a session and its message history from the registry."""
         if session_id in self._sessions:
             del self._sessions[session_id]
             self._save()
+            msg_file = self._get_messages_path(session_id)
+            if msg_file.exists():
+                try:
+                    msg_file.unlink()
+                except Exception:
+                    pass
             return True
         return False
