@@ -785,50 +785,209 @@ body {
 }
 
 /* ─── Narrow-screen / VS Code sidebar webview ──────────────────────────────
-   When the container is ≤ 520 px (i.e. inside a VS Code sidebar panel) the
-   three-column layout collapses: hide the session sidebar and the workspace
-   panel so the chat occupies 100 % of the available width.
+   Fires at ≤ 520 px — the typical width of a VS Code sidebar panel.
+   Goal: single-column chat view that matches the browser version quality.
    ────────────────────────────────────────────────────────────────────────── */
 @media (max-width: 520px) {
-  /* Force the body / root to fill whatever width VS Code gives us */
-  html, body, #root {
-    overflow: hidden;
+
+  /* No horizontal scroll — webview viewport can differ from 100vw */
+  html, body {
+    overflow-x: hidden;
+    overflow-y: hidden;
     width: 100%;
+    max-width: 100%;
   }
 
-  /* Hide left session sidebar completely */
-  .sidebar {
-    display: none;
+  #root {
+    width: 100%;
+    max-width: 100%;
   }
 
-  /* Hide right workspace / code explorer panel completely */
-  .workspace-panel {
-    display: none;
+  .app-container {
+    width: 100%;
+    max-width: 100%;
   }
 
-  /* Chat column fills the whole width */
+  /* ── Hide both side panels ───────────────────────────────────────── */
+  .sidebar         { display: none !important; }
+  .workspace-panel { display: none !important; }
+
+  /* Hide the "Workspace" toggle button — nothing to open in narrow view */
+  .stage-actions { display: none; }
+
+  /* ── Main stage: fill all available width ────────────────────────── */
   .main-stage {
     width: 100%;
     min-width: 0;
+    max-width: 100%;
   }
 
-  /* Reduce wide chat padding to something that fits a narrow view */
-  .chat-scroll {
-    padding: 12px 8px;
-  }
-
-  .input-dock {
-    padding: 10px 8px;
-  }
-
-  /* Tighten the stage header */
+  /* ── Header: compact & non-wrapping ─────────────────────────────── */
   .stage-header {
     padding: 0 10px;
+    height: 44px;
   }
 
-  /* Stack badges vertically if they overflow */
   .stage-title-wrap {
-    flex-wrap: wrap;
+    flex: 1;
+    min-width: 0;
+    flex-wrap: nowrap;
+    gap: 5px;
+    overflow: hidden;
+  }
+
+  .stage-title {
+    font-size: 12.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 110px;
+    flex-shrink: 1;
+  }
+
+  /* Hide the LOCAL-SANDBOX badge (less critical in sidebar) */
+  .stage-title-wrap span.badge-tag:first-of-type {
+    display: none;
+  }
+
+  /* Compact the HITL ENABLED badge */
+  .stage-title-wrap span.badge-tag:last-of-type {
+    font-size: 9px;
+    padding: 1px 5px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* ── Chat timeline ───────────────────────────────────────────────── */
+  .chat-scroll {
+    padding: 10px 8px;
+    gap: 14px;
+  }
+
+  /* ── Message items ───────────────────────────────────────────────── */
+  .message-item {
+    gap: 8px;
+  }
+
+  .message-avatar {
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+
+  .message-meta {
+    margin-bottom: 4px;
+  }
+
+  .message-sender {
+    font-size: 12px;
+  }
+
+  .message-time {
+    font-size: 10px;
+  }
+
+  .message-bubble {
+    padding: 10px 12px;
+    font-size: 13px;
+    line-height: 1.55;
+    border-radius: 10px;
+    /* Prevent long words or URLs from breaking the layout */
+    word-break: break-word;
+    overflow-wrap: break-word;
+  }
+
+  .message-bubble pre {
+    font-size: 11.5px;
+    padding: 8px 10px;
+  }
+
+  /* ── HITL Guard card ─────────────────────────────────────────────── */
+  .guard-card {
+    margin-top: 8px;
+    padding: 10px 12px;
+  }
+
+  .guard-header {
+    font-size: 11.5px;
     gap: 6px;
   }
+
+  .guard-desc {
+    font-size: 11.5px;
+    margin-bottom: 10px;
+  }
+
+  .guard-actions {
+    gap: 8px;
+  }
+
+  .btn-approve,
+  .btn-reject {
+    font-size: 11.5px;
+    padding: 5px 10px;
+  }
+
+  /* ── Input dock ──────────────────────────────────────────────────── */
+  .input-dock {
+    padding: 8px;
+    /* Remove the tall top gradient — not needed in narrow view */
+    background: var(--bg-primary);
+  }
+
+  .input-box {
+    padding: 8px 10px;
+    gap: 6px;
+    border-radius: 10px;
+  }
+
+  .prompt-textarea {
+    font-size: 13px;
+    min-height: 38px;
+    max-height: 110px;
+    line-height: 1.5;
+  }
+
+  .input-controls {
+    gap: 6px;
+  }
+
+  /* Model pill — truncate to fit; never push send button off screen */
+  .model-pill {
+    flex: 1;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+  }
+
+  .model-select {
+    flex: 1;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+  }
+
+  .attach-btn {
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+  }
+
+  .send-btn {
+    flex-shrink: 0;
+    width: 30px;
+    height: 30px;
+  }
+
+  /* Attachment chips narrower */
+  .attachment-chip {
+    max-width: 130px;
+    font-size: 11px;
+  }
 }
+
