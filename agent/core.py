@@ -121,6 +121,10 @@ class CodingAgentHarness:
         return self._guard
 
     @property
+    def root_dir(self) -> str:
+        return self._root_dir
+
+    @property
     def sessions(self) -> SessionManager:
         return self._sessions
 

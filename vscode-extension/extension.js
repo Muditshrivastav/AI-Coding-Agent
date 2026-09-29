@@ -242,18 +242,38 @@ function resolvePython(repoRoot) {
   return process.platform === 'win32' ? 'python' : 'python3';
 }
 
+function getTargetWorkspace() {
+  const folders = vscode.workspace.workspaceFolders;
+  if (folders && folders.length > 0) {
+    return folders[0].uri.fsPath;
+  }
+  return null;
+}
+
 /**
- * Launch `uvicorn interfaces.api_server:app` in the workspace folder using
- * the repo's .venv Python (via `python -m uvicorn`).
- *
- * @param {string} repoRoot
+ * Kill any existing 'Coding Agent API' terminal.
  */
-function startApiInTerminal(repoRoot) {
+function killApiTerminal() {
+  const existing = vscode.window.terminals.find(t => t.name === 'Coding Agent API');
+  if (existing) {
+    existing.dispose();
+  }
+}
+
+/**
+ * Launch `uvicorn interfaces.api_server:app` using the repo's .venv Python.
+ * Sets AGENT_ROOT_DIR to the active open workspace folder (e.g. google-adk).
+ *
+ * @param {string} repoRoot      - Absolute path to the AI Coding Agent repo (where api_server.py lives).
+ * @param {boolean} forceRestart - If true, kill any existing API terminal before starting.
+ */
+function startApiInTerminal(repoRoot, forceRestart = false) {
   const python = resolvePython(repoRoot);
+  const targetWorkspace = getTargetWorkspace() || repoRoot;
 
   // Check whether a terminal for the API is already running
   const existing = vscode.window.terminals.find(t => t.name === 'Coding Agent API');
-  if (existing) {
+  if (existing && !forceRestart) {
     existing.show(false);
     vscode.window.showInformationMessage(
       'AI Coding Agent: API terminal is already open. Check the terminal panel at the bottom of VS Code.',
@@ -261,19 +281,32 @@ function startApiInTerminal(repoRoot) {
     return;
   }
 
+  // Kill old terminal if restarting
+  if (existing) {
+    existing.dispose();
+  }
+
   const terminal = vscode.window.createTerminal({
     name: 'Coding Agent API',
     cwd: repoRoot,
+    env: {
+      AGENT_ROOT_DIR: targetWorkspace,
+      // Explicitly blank VSCODE_CWD so it cannot override AGENT_ROOT_DIR
+      // inside the Python process (VS Code sets it to the launch directory).
+      VSCODE_CWD: '',
+    },
   });
   terminal.show(false);
 
-  // Switch directory explicitly and run uvicorn
+  // Switch to repo directory, set env vars, then start uvicorn
   terminal.sendText(`cd "${repoRoot}"`, true);
+  terminal.sendText(`$env:AGENT_ROOT_DIR="${targetWorkspace}"`, true);
+  terminal.sendText(`$env:VSCODE_CWD=""`, true);
   const cmd = `& "${python}" -m uvicorn interfaces.api_server:app --host 127.0.0.1 --port 8000 --reload`;
   terminal.sendText(cmd, true);
 
   vscode.window.showInformationMessage(
-    `AI Coding Agent: Launching API server in terminal at ${repoRoot} …`,
+    `AI Coding Agent: Starting API → workspace: ${vscode.workspace.name || targetWorkspace}`,
   );
 }
 
@@ -308,6 +341,29 @@ function activate(ctx) {
       provider.focus();
       // VS Code built-in command to open and focus the view container
       vscode.commands.executeCommand(`${VIEW_ID}.focus`);
+    }),
+  );
+
+  // ── Watch for workspace folder changes and restart the API server ─────────
+  // When the user adds/removes/changes folders VS Code fires this event.
+  // We kill the old terminal and relaunch so AGENT_ROOT_DIR is always correct.
+  ctx.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      const newWorkspace = getTargetWorkspace();
+      if (!newWorkspace) return;
+
+      const apiTerminal = vscode.window.terminals.find(t => t.name === 'Coding Agent API');
+      if (apiTerminal) {
+        // Only restart if the API is already running
+        vscode.window.showInformationMessage(
+          `AI Coding Agent: Workspace changed to "${vscode.workspace.name}". Restarting API server…`,
+          'Restart Now',
+        ).then(choice => {
+          if (choice === 'Restart Now') {
+            startApiInTerminal(repoRoot, /* forceRestart */ true);
+          }
+        });
+      }
     }),
   );
 

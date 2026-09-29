@@ -59,33 +59,33 @@ def resolve_workspace_root(default: str = ".") -> str:
     """Return the absolute path of the VS Code workspace root to use as root_dir.
 
     Detection order:
-    1. ``AGENT_ROOT_DIR`` env var (explicit user override).
-    2. ``VSCODE_CWD`` env var (set by VS Code terminal).
-    3. `.code-workspace` file found in cwd or any ancestor directory.
-    4. `.git` directory found in cwd or any ancestor directory.
-    5. ``default`` (falls back to the process cwd when default=".").
+    1. ``AGENT_ROOT_DIR`` env var — set explicitly by the VS Code extension to the
+       user's currently open workspace folder.  This always wins.
+    2. `.code-workspace` file found in cwd or any ancestor directory.
+    3. `.git` directory found in cwd or any ancestor directory.
+    4. ``default`` (falls back to the process cwd when default=".").
+
+    NOTE: ``VSCODE_CWD`` is intentionally **skipped**.  That variable reflects
+    where VS Code itself was launched, not the folder the user has open.  When
+    the extension sets ``AGENT_ROOT_DIR`` correctly, ``VSCODE_CWD`` would
+    otherwise override it with the wrong directory.
     """
-    # 1. Explicit override
+    # 1. Explicit override from the VS Code extension
     explicit = os.environ.get("AGENT_ROOT_DIR", "").strip()
     if explicit and os.path.isdir(explicit):
         return os.path.abspath(explicit)
 
-    # 2. VS Code terminal sets VSCODE_CWD to the workspace folder
-    vscode_cwd = os.environ.get("VSCODE_CWD", "").strip()
-    if vscode_cwd and os.path.isdir(vscode_cwd):
-        return os.path.abspath(vscode_cwd)
-
     cwd = os.getcwd()
 
-    # 3. .code-workspace file (multi-root workspace)
+    # 2. .code-workspace file (multi-root workspace)
     workspace_file_root = _vscode_workspace_file(cwd)
     if workspace_file_root and os.path.isdir(workspace_file_root):
         return workspace_file_root
 
-    # 4. Git root
+    # 3. Git root
     git_root = _find_upward(cwd, (".git",))
     if git_root:
         return git_root
 
-    # 5. Fallback
+    # 4. Fallback
     return os.path.abspath(default)

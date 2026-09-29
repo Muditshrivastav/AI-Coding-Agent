@@ -70,8 +70,15 @@ async def startup_event() -> None:
 
 
 @app.get("/health")
-async def health_check() -> dict[str, str]:
-    return {"status": "ok"}
+async def health_check() -> dict[str, Any]:
+    global harness
+    root = harness.root_dir if harness else resolve_workspace_root()
+    import os
+    return {
+        "status": "ok",
+        "workspace_root": root,
+        "workspace_name": os.path.basename(root) or root,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +289,8 @@ async def github_auth_status(user_id: str) -> dict[str, Any]:
 async def get_workspace_files(path: str = "") -> dict[str, Any]:
     """Return directory tree listing for workspace viewer."""
     import os
-    base_dir = os.path.abspath(".")
+    global harness
+    base_dir = os.path.abspath(harness.root_dir if harness else ".")
     target_dir = os.path.abspath(os.path.join(base_dir, path))
     if not target_dir.startswith(base_dir):
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -308,7 +316,8 @@ async def get_workspace_files(path: str = "") -> dict[str, Any]:
 async def get_file_content(path: str = Query(..., description="Relative file path")) -> dict[str, Any]:
     """Read file content for IDE code viewer."""
     import os
-    base_dir = os.path.abspath(".")
+    global harness
+    base_dir = os.path.abspath(harness.root_dir if harness else ".")
     full_path = os.path.abspath(os.path.join(base_dir, path))
     if not full_path.startswith(base_dir):
         raise HTTPException(status_code=403, detail="Forbidden")
