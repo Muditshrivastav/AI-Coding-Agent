@@ -32,6 +32,22 @@ const crypto = require('crypto');
 const VIEW_ID = 'codingAgent.ui';
 const API_BASE = 'http://127.0.0.1:8000';
 
+// Track last known workspace so we can detect changes between polls
+let _lastKnownWorkspace = '';
+
+// Timestamp (ms) of the last API launch — used to give uvicorn time to boot
+// before the poller declares the server "dead" and tries to restart it.
+let _apiLastStartedAt = 0;
+
+// How long (ms) to wait after a launch before health-check restarts are allowed.
+const _API_BOOT_GRACE_MS = 45_000;
+
+// Mutex: serialises concurrent calls to ensureApiRunning so only ONE terminal
+// is ever started at a time (fixes the activate + resolveWebviewView race).
+// When non-null, a start is already in progress and callers should await it.
+/** @type {Promise<void> | null} */
+let _startLock = null;
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
@@ -44,10 +60,10 @@ const API_BASE = 'http://127.0.0.1:8000';
  */
 function getDistDir(/** @type {vscode.ExtensionContext} */ ctx) {
   const candidates = [
-    path.join(ctx.extensionPath, 'dist'),
-    path.join(ctx.extensionPath, 'ui', 'dist'),
     path.join(ctx.extensionPath, '..', 'ui', 'dist'),
     'd:\\Machine Learning\\AI Coding Agent\\ui\\dist',
+    path.join(ctx.extensionPath, 'dist'),
+    path.join(ctx.extensionPath, 'ui', 'dist'),
   ];
 
   const folders = vscode.workspace.workspaceFolders || [];
@@ -56,10 +72,27 @@ function getDistDir(/** @type {vscode.ExtensionContext} */ ctx) {
     candidates.push(path.join(folder.uri.fsPath, 'AI Coding Agent', 'ui', 'dist'));
   }
 
+  // Find all candidate dist folders that have index.html and pick the newest one
+  let newestDir = null;
+  let newestTime = 0;
+
   for (const c of candidates) {
-    if (fs.existsSync(path.join(c, 'index.html'))) {
-      return c;
+    const indexPath = path.join(c, 'index.html');
+    if (fs.existsSync(indexPath)) {
+      try {
+        const mtime = fs.statSync(indexPath).mtimeMs;
+        if (mtime > newestTime) {
+          newestTime = mtime;
+          newestDir = c;
+        }
+      } catch (_) {
+        if (!newestDir) newestDir = c;
+      }
     }
+  }
+
+  if (newestDir) {
+    return newestDir;
   }
 
   // Fallback to default
@@ -299,7 +332,7 @@ function killApiTerminal() {
 function isApiAlive() {
   return new Promise((resolve) => {
     const http = require('http');
-    const req = http.get('http://127.0.0.1:8000/health', { timeout: 1500 }, (res) => {
+    const req = http.get('http://127.0.0.1:8000/health', { timeout: 2000 }, (res) => {
       res.resume();
       resolve(res.statusCode === 200);
     });
@@ -312,27 +345,90 @@ function isApiAlive() {
 }
 
 /**
+ * Ask the running API what workspace root it currently has configured.
+ * Returns null if the server is not reachable.
+ * @returns {Promise<string|null>}
+ */
+function getApiWorkspace() {
+  return new Promise((resolve) => {
+    const http = require('http');
+    let body = '';
+    const req = http.get('http://127.0.0.1:8000/workspace', { timeout: 2000 }, (res) => {
+      res.on('data', chunk => { body += chunk; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(body).workspace_root || null); }
+        catch { resolve(null); }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+  });
+}
+
+/**
  * Ensure the API server is running without asking the user.
- * If the API is already alive or terminal is running, does nothing.
- * Otherwise, automatically starts it in the terminal.
+ *
+ * Uses a promise-based mutex (_startLock) so that concurrent callers
+ * (e.g. activate() and resolveWebviewView() both firing at startup) are
+ * serialised — only the first caller actually launches uvicorn.
  *
  * @param {string} repoRoot
  * @param {boolean} silent
  */
 async function ensureApiRunning(repoRoot, silent = true) {
+  // If a start is already in progress, wait for it to finish and return.
+  // After it finishes the server will be up, so we don't need to do anything.
+  if (_startLock) {
+    await _startLock;
+    return;
+  }
+
+  // Fast-path: server is already alive — just sync workspace.
   const alive = await isApiAlive();
   if (alive) {
     const targetWorkspace = getTargetWorkspace() || repoRoot;
-    notifyServerOfWorkspace(targetWorkspace);
+    if (targetWorkspace !== _lastKnownWorkspace) {
+      _lastKnownWorkspace = targetWorkspace;
+      notifyServerOfWorkspace(targetWorkspace, /* immediate */ true);
+    }
     return;
   }
 
-  const existing = vscode.window.terminals.find(t => t.name === 'Coding Agent API');
-  if (existing) {
-    return;
-  }
+  // Acquire the lock — any concurrent caller that reaches here now will
+  // await this promise and skip doing anything once it resolves.
+  // releaseLock is initialised to a no-op so @ts-check knows it is always
+  // callable, even though the Promise executor assigns it synchronously.
+  /** @type {() => void} */
+  let releaseLock = () => {};
+  _startLock = new Promise(resolve => { releaseLock = resolve; });
 
-  startApiInTerminal(repoRoot, false, silent);
+  try {
+    // Re-check liveness after acquiring the lock (a concurrent caller may
+    // have just started the server while we were awaiting the lock).
+    const aliveNow = await isApiAlive();
+    if (aliveNow) {
+      const targetWorkspace = getTargetWorkspace() || repoRoot;
+      if (targetWorkspace !== _lastKnownWorkspace) {
+        _lastKnownWorkspace = targetWorkspace;
+        notifyServerOfWorkspace(targetWorkspace, /* immediate */ true);
+      }
+      return;
+    }
+
+    // Dispose any stale ghost terminal whose process has exited.
+    const existing = vscode.window.terminals.find(t => t.name === 'Coding Agent API');
+    if (existing) {
+      console.log('[AI Coding Agent] Stale API terminal found (server not responding). Disposing and restarting...');
+      existing.dispose();
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    startApiInTerminal(repoRoot, false, silent);
+  } finally {
+    // Always release the lock so future callers are not blocked forever.
+    _startLock = null;
+    releaseLock();
+  }
 }
 
 /**
@@ -364,6 +460,9 @@ function startApiInTerminal(repoRoot, forceRestart = false, silent = false) {
     existing.dispose();
   }
 
+  // Record start time so the poller won't kill uvicorn before it finishes booting
+  _apiLastStartedAt = Date.now();
+
   const terminal = vscode.window.createTerminal({
     name: 'Coding Agent API',
     cwd: repoRoot,
@@ -383,10 +482,12 @@ function startApiInTerminal(repoRoot, forceRestart = false, silent = false) {
   const cmd = `& "${python}" -m uvicorn interfaces.api_server:app --host 127.0.0.1 --port 8000 --reload`;
   terminal.sendText(cmd, true);
 
+  // Track last known workspace
+  _lastKnownWorkspace = targetWorkspace;
+
   // After uvicorn boots, push the correct workspace to the /workspace/set endpoint.
-  // This guarantees the harness uses the right root even if AGENT_ROOT_DIR was
-  // shadowed by VSCODE_CWD or a stale --reload worker.
-  notifyServerOfWorkspace(targetWorkspace);
+  // immediate=false means we wait 5 s before the first attempt (uvicorn needs time to start).
+  notifyServerOfWorkspace(targetWorkspace, /* immediate */ false);
 
   if (!silent) {
     vscode.window.showInformationMessage(
@@ -396,11 +497,14 @@ function startApiInTerminal(repoRoot, forceRestart = false, silent = false) {
 }
 
 /**
- * Retry POST /workspace/set until the server accepts it (handles slow startup).
- * @param {string} targetWorkspace
- * @param {number} maxRetries
+ * Retry POST /workspace/set until the server accepts it.
+ *
+ * @param {string}  targetWorkspace
+ * @param {boolean} immediate - true  → try right away (server already running);
+ *                              false → wait 5 s first (server just launched).
+ * @param {number}  maxRetries
  */
-function notifyServerOfWorkspace(targetWorkspace, maxRetries = 20) {
+function notifyServerOfWorkspace(targetWorkspace, immediate = false, maxRetries = 30) {
   let attempts = 0;
 
   async function trySet() {
@@ -410,8 +514,10 @@ function notifyServerOfWorkspace(targetWorkspace, maxRetries = 20) {
       const body = JSON.stringify({ root_dir: targetWorkspace });
       await new Promise((resolve, reject) => {
         const req = http.request(
-          { hostname: '127.0.0.1', port: 8000, path: '/workspace/set', method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } },
+          {
+            hostname: '127.0.0.1', port: 8000, path: '/workspace/set', method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+          },
           (res) => {
             res.resume();
             if (res.statusCode === 200) resolve(true);
@@ -422,7 +528,8 @@ function notifyServerOfWorkspace(targetWorkspace, maxRetries = 20) {
         req.write(body);
         req.end();
       });
-      // Success
+      // Success — update tracking variable
+      _lastKnownWorkspace = targetWorkspace;
       console.log(`[AI Coding Agent] Workspace set to: ${targetWorkspace}`);
     } catch (_err) {
       if (attempts < maxRetries) {
@@ -433,8 +540,73 @@ function notifyServerOfWorkspace(targetWorkspace, maxRetries = 20) {
     }
   }
 
-  // First attempt after 4 s — uvicorn typically needs 2-3 s to start
-  setTimeout(trySet, 4000);
+  if (immediate) {
+    // Server is already up — attempt right away
+    trySet();
+  } else {
+    // Server was just launched — give uvicorn ~5 s to finish booting
+    setTimeout(trySet, 5000);
+  }
+}
+
+// ─── Workspace-change poller ─────────────────────────────────────────────────
+
+/**
+ * Poll every 5 seconds.
+ *
+ * Detects two conditions automatically:
+ *  1. The API server has crashed/exited → restart it.
+ *  2. The open workspace folder changed (e.g. user hit "Open Folder") but
+ *     onDidChangeWorkspaceFolders didn't fire → hot-swap via POST /workspace/set.
+ *
+ * @param {string} repoRoot
+ * @returns {NodeJS.Timeout} handle — push a dispose wrapper into ctx.subscriptions
+ */
+function startWorkspacePoller(repoRoot) {
+  // Guard flag: prevent overlapping restart attempts from the poller
+  let _pollerRestarting = false;
+
+  return setInterval(async () => {
+    const currentWorkspace = getTargetWorkspace() || repoRoot;
+    const alive = await isApiAlive();
+
+    if (!alive) {
+      // ── Boot-grace window ─────────────────────────────────────────────────
+      // If uvicorn was launched recently, it may still be booting.
+      // Do NOT kill/restart it — just wait for the next poll tick.
+      const msSinceLaunch = Date.now() - _apiLastStartedAt;
+      if (msSinceLaunch < _API_BOOT_GRACE_MS) {
+        console.log(`[AI Coding Agent] Poller: server not yet up — waiting for boot (${Math.round(msSinceLaunch / 1000)}s / ${_API_BOOT_GRACE_MS / 1000}s grace).`);
+        return;
+      }
+
+      // Grace period has passed and the server is still not responding.
+      // Guard against concurrent restart attempts.
+      if (_pollerRestarting) return;
+      _pollerRestarting = true;
+
+      try {
+        // Dispose any stale terminal
+        const existing = vscode.window.terminals.find(t => t.name === 'Coding Agent API');
+        if (existing) {
+          existing.dispose();
+          await new Promise(r => setTimeout(r, 600));
+        }
+        console.log('[AI Coding Agent] Poller: API is down (grace period expired). Restarting...');
+        startApiInTerminal(repoRoot, false, /* silent */ true);
+      } finally {
+        _pollerRestarting = false;
+      }
+      return;
+    }
+
+    // Server alive — sync workspace if it changed
+    if (currentWorkspace !== _lastKnownWorkspace) {
+      console.log(`[AI Coding Agent] Poller: workspace changed ${_lastKnownWorkspace} → ${currentWorkspace}`);
+      _lastKnownWorkspace = currentWorkspace;
+      notifyServerOfWorkspace(currentWorkspace, /* immediate */ true);
+    }
+  }, 5000);
 }
 
 // ─── Extension entry points ──────────────────────────────────────────────────
@@ -444,6 +616,9 @@ function notifyServerOfWorkspace(targetWorkspace, maxRetries = 20) {
  */
 function activate(ctx) {
   const repoRoot = resolveRepoRoot(ctx);
+
+  // ── Initialise last-known workspace tracking ──────────────────────────────
+  _lastKnownWorkspace = getTargetWorkspace() || repoRoot;
 
   // ── Auto-start API quietly whenever the extension activates ──────────────
   ensureApiRunning(repoRoot, /* silent */ true);
@@ -476,23 +651,33 @@ function activate(ctx) {
     }),
   );
 
-  // ── Watch for workspace folder changes and restart the API server ─────────
-  // When the user adds/removes/changes folders VS Code fires this event.
-  // We kill the old terminal and relaunch so AGENT_ROOT_DIR is always correct.
+  // ── Watch for VS Code workspace folder changes ───────────────────────────
+  // Fires when folders are added/removed via the VS Code workspace API.
+  // The poller below also catches changes that don't trigger this event.
   ctx.subscriptions.push(
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       const newWorkspace = getTargetWorkspace();
-      if (!newWorkspace) return;
+      if (!newWorkspace || newWorkspace === _lastKnownWorkspace) return;
 
-      const apiTerminal = vscode.window.terminals.find(t => t.name === 'Coding Agent API');
-      if (apiTerminal) {
-        // Automatically restart so the API switches to the new workspace
-        startApiInTerminal(repoRoot, /* forceRestart */ true, /* silent */ true);
-      } else {
-        notifyServerOfWorkspace(newWorkspace);
-      }
+      console.log(`[AI Coding Agent] onDidChangeWorkspaceFolders: ${_lastKnownWorkspace} → ${newWorkspace}`);
+      _lastKnownWorkspace = newWorkspace;
+
+      // Hot-swap if server is alive, otherwise restart
+      isApiAlive().then(alive => {
+        if (alive) {
+          notifyServerOfWorkspace(newWorkspace, /* immediate */ true);
+        } else {
+          startApiInTerminal(repoRoot, /* forceRestart */ true, /* silent */ true);
+        }
+      });
     }),
   );
+
+  // ── Periodic health + workspace poller (every 5 s) ───────────────────────
+  // Automatically restarts a crashed API and detects workspace folder changes
+  // that did not fire onDidChangeWorkspaceFolders (e.g. "Open Folder" dialog).
+  const pollerHandle = startWorkspacePoller(repoRoot);
+  ctx.subscriptions.push({ dispose: () => clearInterval(pollerHandle) });
 }
 
 function deactivate() {

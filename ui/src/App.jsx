@@ -26,39 +26,166 @@ import {
   Paperclip,
   Image as ImageIcon,
   X,
-  File
+  File,
+  History,
+  Copy,
+  Check,
+  Bot
 } from 'lucide-react'
 
 const API_BASE = 'http://127.0.0.1:8000'
 
-const getWelcomeMessage = () => ({
-  id: 'init-1',
-  sender: 'agent',
-  time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-  text: `👋 **AI Coding Agent Ready.**\n\n- **Sandbox:** Local Shell Execution (No Docker required)\n- **Guardrail:** Active (\`permissions.json\` HITL Gate)\n- **Model:** Groq / Ollama Hybrid Engine\n\nWhat would you like me to build or inspect today?`,
-})
+// --- Lightweight Markdown & Code Block Renderer ---
+function CodeBlock({ code, lang }) {
+  const [copied, setCopied] = useState(false)
+
+  const handleCopy = () => {
+    navigator.clipboard?.writeText(code)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  return (
+    <div className="code-block-container">
+      <div className="code-block-header">
+        <span className="code-block-lang">{lang || 'code'}</span>
+        <button className="code-copy-btn" onClick={handleCopy} title="Copy code">
+          {copied ? <Check size={12} style={{ color: 'var(--accent-green)' }} /> : <Copy size={12} />}
+          <span>{copied ? 'Copied' : 'Copy'}</span>
+        </button>
+      </div>
+      <pre className="code-block-body">
+        <code>{code}</code>
+      </pre>
+    </div>
+  )
+}
+
+function FormattedContent({ content }) {
+  if (!content) return null
+
+  // Split on code fences ```lang\ncode```
+  const parts = []
+  const fenceRegex = /```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g
+  let lastIndex = 0
+  let match
+
+  while ((match = fenceRegex.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push({ type: 'text', text: content.slice(lastIndex, match.index) })
+    }
+    parts.push({ type: 'code', lang: match[1] || 'text', code: match[2].trimEnd() })
+    lastIndex = match.index + match[0].length
+  }
+
+  if (lastIndex < content.length) {
+    parts.push({ type: 'text', text: content.slice(lastIndex) })
+  }
+
+  // Parse inline markdown elements for text chunks
+  const renderTextChunk = (text, chunkIdx) => {
+    const lines = text.split('\n')
+    return (
+      <div key={`chunk-${chunkIdx}`} className="markdown-text-chunk">
+        {lines.map((line, lIdx) => {
+          // Headers
+          if (line.startsWith('### ')) {
+            return <h4 key={lIdx} className="md-h4">{renderInline(line.slice(4))}</h4>
+          }
+          if (line.startsWith('## ')) {
+            return <h3 key={lIdx} className="md-h3">{renderInline(line.slice(3))}</h3>
+          }
+          if (line.startsWith('# ')) {
+            return <h2 key={lIdx} className="md-h2">{renderInline(line.slice(2))}</h2>
+          }
+          // Bullet points
+          if (line.startsWith('- ') || line.startsWith('* ')) {
+            return (
+              <div key={lIdx} className="md-bullet">
+                <span className="md-bullet-dot">•</span>
+                <span className="md-bullet-text">{renderInline(line.slice(2))}</span>
+              </div>
+            )
+          }
+          // Empty line
+          if (!line.trim()) {
+            return <div key={lIdx} className="md-spacer" />
+          }
+          // Regular paragraph
+          return <p key={lIdx} className="md-p">{renderInline(line)}</p>
+        })}
+      </div>
+    )
+  }
+
+  const renderInline = (str) => {
+    // Split on inline code `code`
+    const codeTokens = str.split(/(`[^`]+`)/g)
+    return codeTokens.map((token, tIdx) => {
+      if (token.startsWith('`') && token.endsWith('`') && token.length > 2) {
+        return <code key={tIdx} className="md-inline-code">{token.slice(1, -1)}</code>
+      }
+      // Bold **bold**
+      const boldTokens = token.split(/(\*\*[^*]+\*\*)/g)
+      return boldTokens.map((bToken, bIdx) => {
+        if (bToken.startsWith('**') && bToken.endsWith('**') && bToken.length > 4) {
+          return <strong key={`${tIdx}-${bIdx}`}>{bToken.slice(2, -2)}</strong>
+        }
+        return bToken
+      })
+    })
+  }
+
+  return (
+    <div className="formatted-message">
+      {parts.map((p, idx) => {
+        if (p.type === 'code') {
+          return <CodeBlock key={idx} lang={p.lang} code={p.code} />
+        }
+        return renderTextChunk(p.text, idx)
+      })}
+    </div>
+  )
+}
 
 export default function App() {
   const [sessions, setSessions] = useState([])
   const [activeSessionId, setActiveSessionId] = useState('')
-  const [messages, setMessages] = useState([getWelcomeMessage()])
+  const [messages, setMessages] = useState([])
   const [prompt, setPrompt] = useState('')
   const [isRunning, setIsRunning] = useState(false)
   const [pendingApproval, setPendingApproval] = useState(null)
   const [attachments, setAttachments] = useState([])
   const [selectedModel, setSelectedModel] = useState('groq:qwen/qwen3.8-27b')
-  const fileInputRef = useRef(null)
+  const [isOnline, setIsOnline] = useState(false)
+  const [activeDrawer, setActiveDrawer] = useState(null) // null | 'sessions' | 'workspace'
   
+  const fileInputRef = useRef(null)
+  const textareaRef = useRef(null)
+  const chatEndRef = useRef(null)
+
   // Workspace explorer states
   const [rightPanelTab, setRightPanelTab] = useState('files') // 'files' | 'artifacts' | 'guard'
   const [files, setFiles] = useState([])
   const [selectedFile, setSelectedFile] = useState(null)
   const [fileContent, setFileContent] = useState('')
-  const [logs, setLogs] = useState([])
-  const [workspaceInfo, setWorkspaceInfo] = useState(null) // { workspace_root, workspace_name }
+  const [workspaceInfo, setWorkspaceInfo] = useState(null)
+  const [expandedFolders, setExpandedFolders] = useState({})
+  const [folderContents, setFolderContents] = useState({})
 
-  const chatEndRef = useRef(null)
+  // Connect helper to wake VS Code extension API
+  const handleConnect = () => {
+    try {
+      if (typeof window !== 'undefined' && window.acquireVsCodeApi) {
+        window.vscodeApi = window.vscodeApi || window.acquireVsCodeApi()
+        window.vscodeApi?.postMessage({ command: 'startApi' })
+      }
+    } catch (_) {}
+    fetchWorkspaceInfo()
+    fetchSessions()
+  }
 
+  // Initial load and polling
   useEffect(() => {
     fetchSessions()
     fetchFiles()
@@ -83,26 +210,32 @@ export default function App() {
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, pendingApproval])
+  }, [messages, pendingApproval, isRunning])
 
   // --- Session Management ---
   const fetchWorkspaceInfo = async () => {
     try {
       const res = await fetch(`${API_BASE}/workspace`)
       if (res.ok) {
+        setIsOnline(true)
         const data = await res.json()
         setWorkspaceInfo(prev => {
           if (prev?.workspace_root === data.workspace_root) return prev
           return data
         })
+      } else {
+        setIsOnline(false)
       }
-    } catch (_) {}
+    } catch (_) {
+      setIsOnline(false)
+    }
   }
 
   const fetchSessions = async () => {
     try {
       const res = await fetch(`${API_BASE}/sessions`)
       if (res.ok) {
+        setIsOnline(true)
         const data = await res.json()
         setSessions(prev => {
           if (JSON.stringify(prev.map(s => s.id)) !== JSON.stringify(data.map(s => s.id))) {
@@ -116,18 +249,18 @@ export default function App() {
           handleCreateSession('Default Session')
         }
       }
-    } catch (err) {
-      // server offline or connecting
+    } catch (_) {
+      setIsOnline(false)
     }
   }
 
   const handleSelectSession = (sessionId) => {
     if (sessionId === activeSessionId) return
-    // Clear out previous session messages immediately so they don't bleed into new session
-    setMessages([getWelcomeMessage()])
+    setMessages([])
     setPendingApproval(null)
     setAttachments([])
     setActiveSessionId(sessionId)
+    setActiveDrawer(null)
   }
 
   const handleCreateSession = async (title = 'New Agent Task') => {
@@ -140,10 +273,11 @@ export default function App() {
       if (res.ok) {
         const newSession = await res.json()
         setSessions(prev => [newSession, ...prev])
-        setMessages([getWelcomeMessage()])
+        setMessages([])
         setPendingApproval(null)
         setAttachments([])
         setActiveSessionId(newSession.id)
+        setActiveDrawer(null)
       }
     } catch (err) {
       console.error(err)
@@ -216,13 +350,18 @@ export default function App() {
     }
   }
 
+  const handleClearChat = () => {
+    setMessages([])
+    setPendingApproval(null)
+    setAttachments([])
+  }
+
   const loadSessionState = async (threadId) => {
     try {
       const res = await fetch(`${API_BASE}/runs/${threadId}`)
       if (res.ok) {
         const state = await res.json()
         if (state && state.messages && state.messages.length > 0) {
-          // Map messages whether returned from LangGraph or persistent session JSON
           const mapped = state.messages.map((m, idx) => ({
             id: m.id || `msg-${idx}`,
             sender: m.sender || (m.type === 'human' || m.role === 'user' ? 'user' : 'agent'),
@@ -242,23 +381,58 @@ export default function App() {
           return
         }
       }
-      // If thread has no runs or messages recorded yet, ensure clean initial greeting
-      setMessages(prev => {
-        if (prev.length === 1 && prev[0].id === 'init-1') return prev
-        // Only reset if it's currently holding messages from an execution
-        if (prev.some(m => m.id !== 'init-1')) {
-          return [getWelcomeMessage()]
+    } catch (_) {}
+  }
+
+  // --- File Attachments ---
+  const handleFileSelect = (e) => {
+    const fileList = Array.from(e.target.files || [])
+    if (!fileList.length) return
+
+    fileList.forEach(file => {
+      const isImg = file.type.startsWith('image/')
+      const reader = new FileReader()
+
+      if (isImg) {
+        reader.onload = (event) => {
+          setAttachments(prev => [
+            ...prev,
+            {
+              id: `att-${Date.now()}-${Math.random()}`,
+              name: file.name,
+              type: 'image',
+              size: file.size,
+              dataUrl: event.target.result,
+            }
+          ])
         }
-        return prev
-      })
-    } catch (err) {
-      // No state yet for thread
-    }
+        reader.readAsDataURL(file)
+      } else {
+        reader.onload = (event) => {
+          setAttachments(prev => [
+            ...prev,
+            {
+              id: `att-${Date.now()}-${Math.random()}`,
+              name: file.name,
+              type: 'file',
+              size: file.size,
+              content: event.target.result,
+            }
+          ])
+        }
+        reader.readAsText(file)
+      }
+    })
+
+    if (e.target) e.target.value = ''
+  }
+
+  const handleRemoveAttachment = (id) => {
+    setAttachments(prev => prev.filter(a => a.id !== id))
   }
 
   const runAbortControllerRef = useRef(null)
 
-  // --- Stop In-Flight Run ---
   const handleStopRun = async () => {
     if (!isRunning) return
     try {
@@ -269,7 +443,7 @@ export default function App() {
         await fetch(`${API_BASE}/runs/${activeSessionId}/stop`, { method: 'POST' })
       }
     } catch (e) {
-      console.warn('Failed to dispatch stop request', e)
+      console.warn('Stop run error', e)
     } finally {
       setIsRunning(false)
       setMessages(prev => [
@@ -284,21 +458,19 @@ export default function App() {
     }
   }
 
-  // --- Run Execution & HITL Guard ---
-  const handleSendMessage = async (e) => {
-    e?.preventDefault()
+  const handleSendMessage = async (customPrompt) => {
+    const messageToSend = typeof customPrompt === 'string' ? customPrompt : prompt
     if (isRunning) {
       handleStopRun()
       return
     }
-    if (!prompt.trim() && attachments.length === 0) return
+    if (!messageToSend.trim() && attachments.length === 0) return
 
-    const rawPrompt = prompt
+    const rawPrompt = messageToSend
     const currentAttachments = [...attachments]
     setPrompt('')
     setAttachments([])
 
-    // Construct enriched prompt with attached file contents / names
     let finalPrompt = rawPrompt.trim()
     const fileSnippets = currentAttachments.map(att => {
       if (att.type === 'file' && att.content) {
@@ -359,9 +531,8 @@ export default function App() {
       fetchFiles()
     } catch (err) {
       setIsRunning(false)
-      if (err.name === 'AbortError') {
-        return
-      }
+      if (err.name === 'AbortError') return
+
       const isFetchFail = err.message && err.message.toLowerCase().includes('fetch')
       if (isFetchFail) {
         // Auto-request VS Code extension host to boot the API server immediately
@@ -411,7 +582,9 @@ export default function App() {
           id: `approval-${Date.now()}`,
           sender: 'agent',
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          text: approved ? `✅ **Action Approved.** Harness proceeded with execution.\n\n${JSON.stringify(data, null, 2)}` : `❌ **Action Rejected by User.** Agent pipeline halted safely.`,
+          text: approved
+            ? `✅ **Action Approved.** Agent resumed execution.\n\n${JSON.stringify(data, null, 2)}`
+            : `❌ **Action Rejected by User.** Agent stopped safely.`,
         }
       ])
       fetchFiles()
@@ -421,10 +594,7 @@ export default function App() {
     }
   }
 
-  // --- Workspace & Code Inspector ---
-  const [expandedFolders, setExpandedFolders] = useState({})
-  const [folderContents, setFolderContents] = useState({})
-
+  // --- Workspace File Explorer ---
   const fetchFiles = async (folderPath = '') => {
     try {
       const url = folderPath 
@@ -439,9 +609,7 @@ export default function App() {
           setFolderContents(prev => ({ ...prev, [folderPath]: data.files || [] }))
         }
       }
-    } catch (err) {
-      console.log('Workspace files fetch error:', err)
-    }
+    } catch (_) {}
   }
 
   const toggleFolder = async (folder) => {
@@ -479,36 +647,29 @@ export default function App() {
         <div key={f.path}>
           <div
             className={`file-tree-item ${selectedFile?.path === f.path ? 'active' : ''}`}
-            style={{ paddingLeft: `${8 + depth * 14}px` }}
+            style={{ paddingLeft: `${8 + depth * 12}px` }}
             onClick={() => handleSelectFile(f)}
           >
             {isDir ? (
               <>
-                <span style={{ display: 'inline-flex', alignItems: 'center', opacity: 0.6 }}>
-                  {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                <span className="file-tree-arrow">
+                  {isExpanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
                 </span>
-                {isExpanded ? (
-                  <FolderOpen size={14} style={{ color: 'var(--accent-amber)' }} />
-                ) : (
-                  <Folder size={14} style={{ color: 'var(--accent-amber)' }} />
-                )}
+                <Folder size={13} style={{ color: 'var(--accent-amber)', flexShrink: 0 }} />
               </>
             ) : (
               <>
-                <span style={{ width: '12px', display: 'inline-block' }} />
-                <FileCode size={14} style={{ color: 'var(--accent-cyan)' }} />
+                <span style={{ width: '11px', display: 'inline-block' }} />
+                <FileCode size={13} style={{ color: 'var(--accent-cyan)', flexShrink: 0 }} />
               </>
             )}
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {f.name}
-            </span>
+            <span className="file-tree-name">{f.name}</span>
           </div>
 
-          {/* Render children if folder is open */}
           {isDir && isExpanded && (
             <div className="file-tree-subfolder">
               {children.length === 0 ? (
-                <div style={{ paddingLeft: `${24 + depth * 14}px`, fontSize: '11px', color: 'var(--text-dim)', fontStyle: 'italic', paddingBottom: '4px' }}>
+                <div style={{ paddingLeft: `${24 + depth * 12}px`, fontSize: '11px', color: 'var(--text-dim)', fontStyle: 'italic', paddingBottom: '2px' }}>
                   (Empty)
                 </div>
               ) : (
@@ -521,6 +682,13 @@ export default function App() {
     })
   }
 
+  const quickPrompts = [
+    { label: '⚡ Explain Project', prompt: 'Explain the project architecture and what each folder is responsible for.' },
+    { label: '🔍 Find Bugs', prompt: 'Inspect the codebase for any syntax bugs, race conditions, or unhandled exceptions.' },
+    { label: '🧪 Generate Tests', prompt: 'Generate unit tests for the core modules and show how to run them.' },
+    { label: '🛠️ Refactor Code', prompt: 'Recommend key refactoring improvements for code readability and modularity.' },
+  ]
+
   return (
     <div className="app-container">
       {/* 1. Left Sidebar: Antigravity Session Tree & Workspaces */}
@@ -529,153 +697,247 @@ export default function App() {
           <div className="logo-badge">
             <div className="logo-icon-wrap">
               <Sparkles size={16} />
-            </div>
-            <span>CODING AGENT</span>
+          </div>
+
+          <div className="acp-header-actions">
+            <button
+              className="acp-icon-btn"
+              onClick={() => handleCreateSession()}
+              title="New Chat Session"
+            >
+              <Plus size={15} />
+            </button>
+            <button
+              className={`acp-icon-btn ${activeDrawer === 'sessions' ? 'active' : ''}`}
+              onClick={() => setActiveDrawer(activeDrawer === 'sessions' ? null : 'sessions')}
+              title="Chat History"
+            >
+              <History size={14} />
+            </button>
+            <button
+              className={`acp-icon-btn ${activeDrawer === 'workspace' ? 'active' : ''}`}
+              onClick={() => setActiveDrawer(activeDrawer === 'workspace' ? null : 'workspace')}
+              title="Workspace Files"
+            >
+              <FolderTree size={14} />
+            </button>
+            <button
+              className="acp-icon-btn"
+              onClick={handleClearChat}
+              title="Clear Current Messages"
+            >
+              <Trash2 size={14} />
+            </button>
           </div>
         </div>
 
         <button className="btn-new-chat" onClick={() => handleCreateSession()}>
           <Plus size={15} />
           <span>New Session</span>
-        </button>
-
-        <div className="session-list">
-          <div style={{ fontSize: '11px', color: 'var(--text-dim)', padding: '6px 12px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-            Active Threads
-          </div>
-          {sessions.map(s => (
-            <div
-              key={s.id}
-              className={`session-item ${activeSessionId === s.id ? 'active' : ''}`}
-              onClick={() => handleSelectSession(s.id)}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Code2 size={14} style={{ color: activeSessionId === s.id ? 'var(--accent-cyan)' : 'var(--text-dim)' }} />
-                <span className="session-title">{s.title || `Thread ${s.id.slice(0, 8)}`}</span>
-              </div>
-              <button className="session-delete-btn" onClick={(e) => handleDeleteSession(s.id, e)} title="Delete session">
-                <Trash2 size={13} />
               </button>
-            </div>
-          ))}
-        </div>
 
-        <div className="sidebar-footer">
-          <div className="status-indicator">
-            <span className="status-dot"></span>
-            <span>Harness Guard Active</span>
-          </div>
-          <Shield size={14} style={{ color: 'var(--text-muted)' }} />
-        </div>
-      </aside>
-
-      {/* 2. Center Stage: Agent Command & Execution Timeline */}
-      <main className="main-stage">
-        <header className="stage-header">
-          <div className="stage-title-wrap">
-            <div className="stage-title">
-              {sessions.find(s => s.id === activeSessionId)?.title || 'Coding Harness'}
-            </div>
-            <span className="badge-tag">LOCAL-SANDBOX</span>
-            <span className="badge-tag" style={{ color: 'var(--accent-green)', borderColor: 'rgba(16,185,129,0.3)', background: 'rgba(16,185,129,0.1)' }}>
-              HITL ENABLED
-            </span>
-          </div>
-
-          <div className="stage-actions">
-            {workspaceInfo && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: 'var(--text-dim)', padding: '3px 8px', background: 'rgba(255,255,255,0.04)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.06)' }}>
-                <Folder size={12} style={{ color: 'var(--accent-amber)' }} />
-                <span style={{ maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={workspaceInfo.workspace_root}>
-                  {workspaceInfo.workspace_name}
-                </span>
-              </div>
-            )}
-            <button
-              className={`action-btn ${rightPanelTab === 'files' ? 'active' : ''}`}
-              onClick={() => setRightPanelTab(rightPanelTab === 'files' ? null : 'files')}
+          <div className="acp-model-wrap">
+            <Cpu size={12} className="model-icon" />
+            <select
+              className="acp-model-dropdown"
+              value={selectedModel}
+              onChange={(e) => setSelectedModel(e.target.value)}
+              title="Select AI Model"
             >
-              <FolderTree size={14} />
-              <span>Workspace</span>
+              <option value="groq:qwen/qwen3.8-27b">qwen3.8-27b (Groq)</option>
+              <option value="ollama:gpt-oss:120b-cloud">gpt-oss:120b-cloud</option>
+              <option value="ollama:nemotron-3-super:cloud">nemotron-super-cloud</option>
+              <option value="ollama:gemma4:cloud">gemma4:cloud</option>
+            </select>
+          </div>
+        </div>
+      </header>
+
+      {/* ── Slide-over Drawers (Sessions History & Workspace Files) ── */}
+      {activeDrawer === 'sessions' && (
+        <div className="drawer-panel">
+          <div className="drawer-header">
+            <div className="drawer-title">
+              <History size={14} />
+              <span>Chat Threads</span>
+            </div>
+            <button className="drawer-close-btn" onClick={() => setActiveDrawer(null)}>
+              <X size={14} />
             </button>
           </div>
-        </header>
-
-        {/* Message Stream */}
-        <div className="chat-scroll">
-          {messages.map(msg => (
-            <div key={msg.id} className="message-item">
-              <div className={`message-avatar ${msg.sender === 'user' ? 'avatar-user' : 'avatar-agent'}`}>
-                {msg.sender === 'user' ? 'U' : <Sparkles size={16} />}
-              </div>
-              <div className="message-body">
-                <div className="message-meta">
-                  <span className="message-sender">{msg.sender === 'user' ? 'Developer' : 'AI Agent'}</span>
-                  <span className="message-time">{msg.time}</span>
+          <div className="drawer-content">
+            <button className="drawer-new-btn" onClick={() => handleCreateSession()}>
+              <Plus size={14} />
+              <span>New Thread</span>
+            </button>
+            <div className="drawer-list">
+              {sessions.map(s => (
+                <div
+                  key={s.id}
+                  className={`drawer-item ${activeSessionId === s.id ? 'active' : ''}`}
+                  onClick={() => handleSelectSession(s.id)}
+                >
+                  <div className="drawer-item-title">
+                    <Code2 size={13} />
+                    <span>{s.title || `Thread ${s.id.slice(0, 8)}`}</span>
+                  </div>
+                  <button
+                    className="drawer-item-del"
+                    onClick={(e) => handleDeleteSession(s.id, e)}
+                    title="Delete thread"
+                  >
+                    <Trash2 size={12} />
+                  </button>
                 </div>
-                <div className="message-bubble">
-                  {msg.attachments && msg.attachments.length > 0 && (
-                    <div className="message-attachments-preview">
-                      {msg.attachments.map(att => (
-                        <div key={att.id} className="message-att-item">
-                          {att.type === 'image' ? (
-                            <img src={att.dataUrl} alt={att.name} className="message-att-thumb" />
-                          ) : (
-                            <File size={13} style={{ color: 'var(--accent-cyan)' }} />
-                          )}
-                          <span className="message-att-name">{att.name}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                    {msg.text}
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeDrawer === 'workspace' && (
+        <div className="drawer-panel">
+          <div className="drawer-header">
+            <div className="drawer-title">
+              <FolderTree size={14} />
+              <span>{workspaceInfo?.workspace_name || 'Workspace'}</span>
+            </div>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button className="acp-icon-btn" onClick={() => fetchFiles()} title="Refresh">
+                <RefreshCw size={12} />
+              </button>
+              <button className="drawer-close-btn" onClick={() => setActiveDrawer(null)}>
+                <X size={14} />
+              </button>
+            </div>
+          </div>
+          <div className="drawer-content">
+            {!selectedFile ? (
+              <div className="workspace-tree-view">
+                {renderFileTree(files)}
+              </div>
+            ) : (
+              <div className="code-viewer-container">
+                <div className="code-viewer-header">
+                  <span className="code-viewer-path">{selectedFile.path}</span>
+                  <button className="code-viewer-close" onClick={() => setSelectedFile(null)}>
+                    Back to files
+                  </button>
+                </div>
+                <pre className="code-viewer-body">{fileContent}</pre>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Main Chat Stream ── */}
+      <main className="chat-main">
+        {messages.length === 0 ? (
+          <div className="welcome-hero">
+            <div className="welcome-icon-wrap">
+              <Sparkles size={28} />
+            </div>
+            <h2 className="welcome-title">Welcome to Coding Agent</h2>
+            <p className="welcome-desc">
+              Autonomous AI pair programmer right inside your VS Code.
+            </p>
+
+            {workspaceInfo && (
+              <div className="welcome-workspace-pill">
+                <Folder size={12} />
+                <span>{workspaceInfo.workspace_name}</span>
+              </div>
+            )}
+
+            <div className="quick-prompts-grid">
+              {quickPrompts.map((qp, idx) => (
+                <button
+                  key={idx}
+                  className="quick-prompt-btn"
+                  onClick={() => handleSendMessage(qp.prompt)}
+                >
+                  {qp.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="chat-scroll">
+            {messages.map(msg => (
+              <div key={msg.id} className={`message-item ${msg.sender === 'user' ? 'from-user' : 'from-agent'}`}>
+                <div className={`message-avatar ${msg.sender === 'user' ? 'avatar-user' : 'avatar-agent'}`}>
+                  {msg.sender === 'user' ? 'U' : <Sparkles size={14} />}
+                </div>
+
+                <div className="message-content-wrapper">
+                  <div className="message-meta">
+                    <span className="message-sender">{msg.sender === 'user' ? 'You' : 'Coding Agent'}</span>
+                    <span className="message-time">{msg.time}</span>
+                  </div>
+
+                  <div className="message-bubble">
+                    {msg.attachments && msg.attachments.length > 0 && (
+                      <div className="message-attachments-preview">
+                        {msg.attachments.map(att => (
+                          <div key={att.id} className="message-att-item">
+                            {att.type === 'image' ? (
+                              <img src={att.dataUrl} alt={att.name} className="message-att-thumb" />
+                            ) : (
+                              <File size={12} />
+                            )}
+                            <span className="message-att-name">{att.name}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <FormattedContent content={msg.text} />
                   </div>
                 </div>
               </div>
-            </div>
-          ))}
+            ))}
 
-          {/* Pending HITL Approval Gate Card */}
-          {pendingApproval && (
-            <div className="guard-card">
-              <div className="guard-header">
-                <ShieldAlert size={18} />
-                <span>HUMAN-IN-THE-LOOP APPROVAL REQUIRED</span>
-              </div>
-              <div className="guard-desc">
-                {pendingApproval.description}
-                <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11.5px', marginTop: '6px', color: '#f1f5f9', background: 'rgba(0,0,0,0.4)', padding: '6px 10px', borderRadius: '4px' }}>
-                  Action: {pendingApproval.action}
+            {/* Pending HITL Approval Gate Card */}
+            {pendingApproval && (
+              <div className="guard-card">
+                <div className="guard-header">
+                  <ShieldAlert size={16} />
+                  <span>ACTION APPROVAL REQUIRED</span>
+                </div>
+                <div className="guard-desc">
+                  {pendingApproval.description}
+                  <div className="guard-action-preview">
+                    {pendingApproval.action}
+                  </div>
+                </div>
+                <div className="guard-actions">
+                  <button className="btn-approve" onClick={() => handleApproval(true)}>
+                    <CheckCircle2 size={13} />
+                    <span>Approve & Continue</span>
+                  </button>
+                  <button className="btn-reject" onClick={() => handleApproval(false)}>
+                    <XCircle size={13} />
+                    <span>Reject</span>
+                  </button>
                 </div>
               </div>
-              <div className="guard-actions">
-                <button className="btn-approve" onClick={() => handleApproval(true)}>
-                  <CheckCircle2 size={14} />
-                  <span>Approve & Proceed</span>
-                </button>
-                <button className="btn-reject" onClick={() => handleApproval(false)}>
-                  <XCircle size={14} />
-                  <span>Reject</span>
-                </button>
+            )}
+
+            {isRunning && (
+              <div className="running-indicator">
+                <RefreshCw size={13} className="spin-icon" />
+                <span>Agent planning and executing in workspace...</span>
               </div>
-            </div>
-          )}
+            )}
 
-          {isRunning && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-main)', fontSize: '12.5px', padding: '10px 0' }}>
-              <RefreshCw size={14} className="spin" style={{ animation: 'spin 1s linear infinite' }} />
-              <span>Autonomous agent planning and executing commands...</span>
-            </div>
-          )}
+            <div ref={chatEndRef} />
+          </div>
+        )}
 
-          <div ref={chatEndRef} />
-        </div>
-
-        {/* Input Dock */}
+        {/* ── Fixed Bottom Prompt Dock (Antigravity & Codex style) ── */}
         <div className="input-dock">
-          <form className="input-box" onSubmit={handleSendMessage}>
-            {/* Attachment preview tray */}
+          <form className="input-box" onSubmit={(e) => { e.preventDefault(); handleSendMessage(); }}>
             {attachments.length > 0 && (
               <div className="attachments-tray">
                 {attachments.map(att => (
@@ -683,16 +945,15 @@ export default function App() {
                     {att.type === 'image' ? (
                       <img src={att.dataUrl} alt={att.name} className="attachment-chip-thumb" />
                     ) : (
-                      <File size={13} style={{ color: 'var(--text-muted)' }} />
+                      <File size={12} />
                     )}
                     <span className="attachment-chip-name">{att.name}</span>
                     <button
                       type="button"
                       className="attachment-remove-btn"
                       onClick={() => handleRemoveAttachment(att.id)}
-                      title="Remove"
                     >
-                      <X size={12} />
+                      <X size={11} />
                     </button>
                   </div>
                 ))}
@@ -700,9 +961,11 @@ export default function App() {
             )}
 
             <textarea
+              ref={textareaRef}
               className="prompt-textarea"
-              placeholder="Ask the agent to build, debug, refactor, or test (e.g. 'Build an authentication API with tests')..."
+              placeholder="Ask your agent (e.g. 'Build an API', 'Fix test failure')..."
               value={prompt}
+              rows={2}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
@@ -721,29 +984,21 @@ export default function App() {
             />
 
             <div className="input-controls">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div className="input-controls-left">
                 <button
                   type="button"
                   className="attach-btn"
                   onClick={() => fileInputRef.current?.click()}
-                  title="Attach files or images"
+                  title="Attach file or screenshot"
                 >
-                  <Plus size={16} />
+                  <Paperclip size={14} />
                 </button>
-                <div className="model-pill">
-                  <Cpu size={12} style={{ color: 'var(--text-muted)' }} />
-                  <select
-                    className="model-select"
-                    value={selectedModel}
-                    onChange={(e) => setSelectedModel(e.target.value)}
-                    title="Select AI Model"
-                  >
-                    <option value="groq:qwen/qwen3.8-27b">qwen/qwen3.8-27b (Groq)</option>
-                    <option value="ollama:gpt-oss:120b-cloud">gpt-oss:120b-cloud (Ollama)</option>
-                    <option value="ollama:gemma4:cloud">gemma4:cloud (Ollama)</option>
-                    <option value="ollama:nemotron-3-super:cloud">nemotron-3-super:cloud (Ollama)</option>
-                  </select>
-                </div>
+                {workspaceInfo && (
+                  <span className="workspace-badge" title={workspaceInfo.workspace_root}>
+                    <Folder size={11} />
+                    <span>{workspaceInfo.workspace_name}</span>
+                  </span>
+                )}
               </div>
 
               <button
@@ -756,81 +1011,14 @@ export default function App() {
                 {isRunning ? (
                   <Square size={13} fill="currentColor" />
                 ) : (
-                  <Play size={14} fill="currentColor" />
+                  <Play size={13} fill="currentColor" />
                 )}
+                <span>{isRunning ? 'Stop' : 'Send'}</span>
               </button>
             </div>
           </form>
         </div>
       </main>
-
-      {/* 3. Right Panel: Workspace Explorer & Code Preview */}
-      {rightPanelTab && (
-        <aside className="workspace-panel">
-          <div className="panel-header">
-            <div className="panel-tabs">
-              <button
-                className={`panel-tab ${selectedFile ? '' : 'active'}`}
-                onClick={() => setSelectedFile(null)}
-              >
-                Explorer
-              </button>
-              {selectedFile && (
-                <button className="panel-tab active">
-                  {selectedFile.name}
-                </button>
-              )}
-            </div>
-            <button className="action-btn" onClick={fetchFiles} title="Refresh Files">
-              <RefreshCw size={12} />
-            </button>
-          </div>
-
-          <div className="panel-content">
-            {!selectedFile ? (
-              <div>
-                <div style={{ fontSize: '11px', color: 'var(--text-dim)', padding: '4px 6px 2px', fontWeight: 600, textTransform: 'uppercase' }}>
-                  Explorer
-                </div>
-                {workspaceInfo && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '3px 6px 6px', fontSize: '11px', color: 'var(--accent-amber)', borderBottom: '1px solid rgba(255,255,255,0.05)', marginBottom: '4px' }}>
-                    <FolderOpen size={12} />
-                    <span
-                      style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'default' }}
-                      title={workspaceInfo.workspace_root}
-                    >
-                      {workspaceInfo.workspace_name}
-                    </span>
-                  </div>
-                )}
-                {renderFileTree(files)}
-              </div>
-            ) : (
-              <div className="code-viewer-container">
-                <div className="code-viewer-header">
-                  <span>{selectedFile.path}</span>
-                  <button
-                    style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer' }}
-                    onClick={() => setSelectedFile(null)}
-                  >
-                    Close
-                  </button>
-                </div>
-                <div className="code-viewer-body">
-                  {fileContent}
-                </div>
-              </div>
-            )}
-          </div>
-        </aside>
-      )}
-
-      <style>{`
-        @keyframes spin {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-      `}</style>
     </div>
   )
 }
