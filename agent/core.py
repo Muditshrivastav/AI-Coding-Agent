@@ -44,12 +44,87 @@ _INJECTION_PATTERNS: tuple[str, ...] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Supported LLM Models registry
+# Includes cloud Ollama models and Groq models
+# ---------------------------------------------------------------------------
+SUPPORTED_MODELS: dict[str, dict[str, Any]] = {
+    "groq:qwen/qwen3.8-27b": {
+        "id": "groq:qwen/qwen3.8-27b",
+        "provider": "groq",
+        "name": "qwen/qwen3.8-27b",
+        "label": "Qwen 3.8 27B (Groq)",
+        "fallback": "ollama:gpt-oss:120b-cloud",
+    },
+    "ollama:gemma4:cloud": {
+        "id": "ollama:gemma4:cloud",
+        "provider": "ollama",
+        "name": "gemma4:cloud",
+        "label": "Gemma 4 (Cloud)",
+        "aliases": ["gemma4:cloud", "gemma4", "ollama:gemma4"],
+        "fallback": "groq:qwen/qwen3.8-27b",
+    },
+    "ollama:nvidia-nemotron-super:cloud": {
+        "id": "ollama:nvidia-nemotron-super:cloud",
+        "provider": "ollama",
+        "name": "nvidia-nemotron-super:cloud",
+        "label": "NVIDIA Nemotron Super (Cloud)",
+        "aliases": [
+            "nvidia-nemotron-super:cloud",
+            "nemotron-super:cloud",
+            "nemotron-3-super:cloud",
+            "ollama:nemotron-3-super:cloud",
+        ],
+        "fallback": "groq:qwen/qwen3.8-27b",
+    },
+    "ollama:gpt-oss:120b-cloud": {
+        "id": "ollama:gpt-oss:120b-cloud",
+        "provider": "ollama",
+        "name": "gpt-oss:120b-cloud",
+        "label": "GPT-OSS 120B (Cloud)",
+        "aliases": [
+            "gpt-oss-120b:cloud",
+            "gpt-oss:120b-cloud",
+            "ollama:gpt-oss-120b:cloud",
+        ],
+        "fallback": "groq:qwen/qwen3.8-27b",
+    },
+}
+
+
+def normalize_model_identifier(model_name: str | None) -> str:
+    """Normalize user or UI supplied model identifier to registered model key.
+
+    Maps aliases such as 'gemma4:cloud', 'nvidia-nemotron-super:cloud',
+    'gpt-oss-120b:cloud', etc., to their canonical representation.
+    """
+    if not model_name:
+        return "groq:qwen/qwen3.8-27b"
+
+    cleaned = model_name.strip()
+    if cleaned in SUPPORTED_MODELS:
+        return cleaned
+
+    # Check aliases
+    for canonical_id, config in SUPPORTED_MODELS.items():
+        aliases = config.get("aliases", [])
+        if cleaned in aliases or cleaned.lower() in [a.lower() for a in aliases]:
+            return canonical_id
+
+    # If it starts with provider prefix or is unrecognized, retain as-is or auto-prefix
+    if ":" in cleaned:
+        return cleaned
+    return f"ollama:{cleaned}"
+
+
 class CodingAgentHarness:
     """The central harness orchestrator.
 
     Owns the backend, subagents, and checkpointer.
     Provides run() and resume() thread-scoped entry points.
     """
+
+    SUPPORTED_MODELS = SUPPORTED_MODELS
 
     def __init__(
         self,
@@ -60,7 +135,7 @@ class CodingAgentHarness:
         sandbox_mode: str | None = None,
     ) -> None:
         self._root_dir = root_dir
-        self._model = model
+        self._model = normalize_model_identifier(model)
         self._tracer = tracer or LangSmithTracer()
         self._evaluator = HarnessEvaluator(tracer_instance=self._tracer)
 
@@ -139,6 +214,16 @@ class CodingAgentHarness:
     @property
     def evaluator(self) -> HarnessEvaluator:
         return self._evaluator
+
+    @property
+    def model(self) -> str:
+        """Return the default active model identifier."""
+        return self._model
+
+    @property
+    def supported_models(self) -> dict[str, dict[str, Any]]:
+        """Return dictionary of supported models."""
+        return self.SUPPORTED_MODELS
 
     @property
     def skills(self):
@@ -223,7 +308,7 @@ class CodingAgentHarness:
         # ── Pre-flight: auto-generate a query-specific AGENTS.md ──────────────
         # Runs before the agent graph so all subagents (planning, design, build)
         # receive directives tailored to this exact user request.
-        chosen_model = model or self._model
+        chosen_model = normalize_model_identifier(model) if model else self._model
         await generate_agents_md(
             user_request=user_request,
             root_dir=self._root_dir,
@@ -231,7 +316,7 @@ class CodingAgentHarness:
         )
 
         agent_to_invoke = self._agent
-        if model and model != self._model:
+        if chosen_model != self._model:
             # Dynamically build agent with requested model override
             subagents = [
                 planning_subagent,

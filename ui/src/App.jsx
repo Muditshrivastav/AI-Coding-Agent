@@ -30,10 +30,257 @@ import {
   History,
   Copy,
   Check,
-  Bot
+  Bot,
+  Eye,
+  EyeOff,
+  FilePen,
+  Search,
+  FolderSearch,
+  Wrench,
+  Zap
 } from 'lucide-react'
 
 const API_BASE = 'http://127.0.0.1:8000'
+
+// ── Tool call pattern detector ──────────────────────────────────────────────
+// Maps patterns found in agent text to structured tool activity objects.
+const TOOL_PATTERNS = [
+  {
+    id: 'read_file',
+    regex: /(?:reading?|opened?|loading?|fetching?|viewing?)\s+(?:file\s+)?[`'"]?([\w./\\:_-]+\.[\w]+)[`'"]?/i,
+    label: 'Read File',
+    icon: 'eye',
+    color: 'cyan',
+  },
+  {
+    id: 'write_file',
+    regex: /(?:writing?|creating?|saving?|wrote|created?|generated?)\s+(?:file\s+)?[`'"]?([\w./\\:_-]+\.[\w]+)[`'"]?/i,
+    label: 'Write File',
+    icon: 'pen',
+    color: 'green',
+  },
+  {
+    id: 'edit_file',
+    regex: /(?:editing?|modifying?|updating?|patching?|changed?)\s+(?:file\s+)?[`'"]?([\w./\\:_-]+\.[\w]+)[`'"]?/i,
+    label: 'Edit File',
+    icon: 'pen',
+    color: 'amber',
+  },
+  {
+    id: 'bash',
+    regex: /(?:running?|executing?|ran|executed?)\s+(?:command\s+|shell\s+|bash\s+)?[`'"]([^`'"\n]{3,80})[`'"]?/i,
+    label: 'Shell Command',
+    icon: 'terminal',
+    color: 'rose',
+  },
+  {
+    id: 'list_dir',
+    regex: /(?:listing?|scanning?|exploring?)\s+(?:directory|folder|dir)\s+[`'"]?([\w./\\:_-]*)[`'"]?/i,
+    label: 'List Directory',
+    icon: 'folder',
+    color: 'amber',
+  },
+  {
+    id: 'search',
+    regex: /(?:searching?|grep(?:ping)?|finding?|looking for)\s+[`'"]?([^`'"\n]{3,60})[`'"]?/i,
+    label: 'Search',
+    icon: 'search',
+    color: 'blue',
+  },
+]
+
+/**
+ * Splits agent message text into alternating plain-text and tool-activity segments.
+ * Returns an array of { type: 'text'|'tool', ... } objects.
+ */
+function parseMessageParts(text) {
+  if (!text) return [{ type: 'text', content: '' }]
+
+  // Detect explicit [TOOL: ...] markers from backend (if present)
+  const toolBlockRegex = /\[TOOL(?::([^\]]+))?\]([\s\S]*?)\[\/TOOL\]/g
+  const parts = []
+  let lastIdx = 0
+  let m
+
+  while ((m = toolBlockRegex.exec(text)) !== null) {
+    if (m.index > lastIdx) {
+      parts.push({ type: 'text', content: text.slice(lastIdx, m.index).trim() })
+    }
+    const toolName = (m[1] || '').trim().toLowerCase()
+    const body = (m[2] || '').trim()
+    // Extract a short target from the body (first line, max 80 chars)
+    const firstLine = body.split('\n')[0].slice(0, 80)
+    const pattern = TOOL_PATTERNS.find(p => p.id === toolName) || {
+      id: toolName || 'tool',
+      label: toolName || 'Tool Call',
+      icon: 'wrench',
+      color: 'cyan',
+    }
+    parts.push({ type: 'tool', tool: pattern, target: firstLine, body })
+    lastIdx = m.index + m[0].length
+  }
+
+  if (lastIdx < text.length) {
+    parts.push({ type: 'text', content: text.slice(lastIdx).trim() })
+  }
+
+  // If no explicit markers were found, return as single text block
+  if (parts.length === 0 || (parts.length === 1 && parts[0].type === 'text')) {
+    return [{ type: 'text', content: text }]
+  }
+
+  return parts.filter(p => p.type === 'tool' || (p.type === 'text' && p.content))
+}
+
+// ── Tool Activity Card: renders a single SSE tool event ─────────────────────
+// Matches Antigravity-style: "Analyzed App.jsx #L100-160" compact chips
+const TOOL_META = {
+  // deepagents read operations
+  read_file:       { label: 'Read',     icon: 'eye',      color: 'cyan'  },
+  view_file:       { label: 'Analyzed', icon: 'eye',      color: 'cyan'  },
+  read:            { label: 'Analyzed', icon: 'eye',      color: 'cyan'  },
+  glob:            { label: 'Listed',   icon: 'folder',   color: 'amber' },
+  ls:              { label: 'Listed',   icon: 'folder',   color: 'amber' },
+  grep:            { label: 'Searched', icon: 'search',   color: 'blue'  },
+  grep_search:     { label: 'Searched', icon: 'search',   color: 'blue'  },
+  list_dir:        { label: 'Listed',   icon: 'folder',   color: 'amber' },
+  // deepagents write/edit operations
+  write:           { label: 'Wrote',    icon: 'pen',      color: 'green' },
+  write_file:      { label: 'Wrote',    icon: 'pen',      color: 'green' },
+  edit:            { label: 'Edited',   icon: 'pen',      color: 'amber' },
+  edit_file:       { label: 'Edited',   icon: 'pen',      color: 'amber' },
+  replace_file_content: { label: 'Edited', icon: 'pen',  color: 'amber' },
+  write_to_file:   { label: 'Wrote',    icon: 'pen',      color: 'green' },
+  create:          { label: 'Created',  icon: 'pen',      color: 'green' },
+  delete:          { label: 'Deleted',  icon: 'wrench',   color: 'rose'  },
+  // shell
+  execute:         { label: 'Ran',      icon: 'terminal', color: 'rose'  },
+  execute_command: { label: 'Ran',      icon: 'terminal', color: 'rose'  },
+  bash:            { label: 'Ran',      icon: 'terminal', color: 'rose'  },
+  run_command:     { label: 'Ran',      icon: 'terminal', color: 'rose'  },
+  run_verification:{ label: 'Verified', icon: 'terminal', color: 'green' },
+  // search/web
+  tavily_web_search:{ label: 'Searched', icon: 'search',  color: 'blue' },
+  tavily_search_results_json: { label: 'Searched', icon: 'search', color: 'blue' },
+  // misc
+  probabilistic_decision: { label: 'Decided', icon: 'wrench', color: 'cyan' },
+}
+
+function getToolMeta(toolName) {
+  const key = (toolName || '').toLowerCase().replace(/-/g, '_')
+  return TOOL_META[key] || { label: toolName || 'Tool', icon: 'wrench', color: 'cyan' }
+}
+
+/** Extract a short human-readable target from tool input JSON string */
+function extractTarget(inputStr, toolName) {
+  if (!inputStr) return ''
+  try {
+    const obj = JSON.parse(inputStr)
+    // Common file path keys
+    const path = obj.path || obj.file_path || obj.AbsolutePath || obj.file || obj.filename
+      || obj.target_file || obj.TargetFile || obj.command || obj.query || ''
+    if (!path) return inputStr.slice(0, 80)
+    const short = String(path).split(/[\/\\]/).pop() || String(path)
+    // If it has line numbers, add them
+    const startLine = obj.start_line || obj.StartLine || obj.start
+    const endLine = obj.end_line || obj.EndLine || obj.end
+    if (startLine && endLine) return `${short} #L${startLine}-${endLine}`
+    if (startLine) return `${short} #L${startLine}`
+    return short
+  } catch {
+    return inputStr.slice(0, 80)
+  }
+}
+
+function ToolActivityCard({ event }) {
+  const [expanded, setExpanded] = useState(false)
+
+  const isCall = event.type === 'tool_call'
+  const isDone = event.done === true || event.type === 'tool_result'
+  const toolName = event.tool || 'tool'
+  const meta = getToolMeta(toolName)
+
+  const target = isCall
+    ? extractTarget(event.input, toolName)
+    : (event.output || '')
+
+  // Lines analyzed badge
+  const lines = event.lines
+
+  const iconMap = {
+    eye:      <Eye size={12} />,
+    pen:      <FilePen size={12} />,
+    terminal: <Terminal size={12} />,
+    folder:   <Folder size={12} />,
+    search:   <Search size={12} />,
+    wrench:   <Wrench size={12} />,
+  }
+
+  const colorMap = {
+    cyan:  { accent: '#38bdf8', bg: 'rgba(56,189,248,0.06)',  border: 'rgba(56,189,248,0.18)' },
+    green: { accent: '#10b981', bg: 'rgba(16,185,129,0.06)',  border: 'rgba(16,185,129,0.18)' },
+    amber: { accent: '#f59e0b', bg: 'rgba(245,158,11,0.06)',  border: 'rgba(245,158,11,0.18)' },
+    rose:  { accent: '#f43f5e', bg: 'rgba(244,63,94,0.06)',   border: 'rgba(244,63,94,0.18)'  },
+    blue:  { accent: '#38bdf8', bg: 'rgba(2,132,199,0.06)',   border: 'rgba(2,132,199,0.18)'  },
+  }
+
+  const c = colorMap[meta.color] || colorMap.cyan
+  const icon = iconMap[meta.icon] || iconMap.wrench
+
+  const hasDetail = !isDone && event.input && event.input.length > 0
+
+  return (
+    <div
+      className="tool-activity-card"
+      style={{ borderColor: c.border, background: c.bg }}
+      onClick={() => hasDetail && setExpanded(v => !v)}
+    >
+      <div className="tool-activity-header" style={{ cursor: hasDetail ? 'pointer' : 'default' }}>
+        <span className="tool-activity-icon" style={{ color: c.accent }}>{icon}</span>
+        <span className="tool-activity-label" style={{ color: c.accent }}>{meta.label}</span>
+        {target && (
+          <span className="tool-activity-target" title={event.input || event.output}>
+            {target}
+          </span>
+        )}
+        {lines != null && lines > 1 && (
+          <span className="tool-activity-lines">({lines} lines)</span>
+        )}
+        <span className="tool-activity-status">
+          {isDone
+            ? <CheckCircle2 size={11} style={{ color: '#10b981' }} />
+            : <RefreshCw size={11} className="spin-icon" style={{ color: c.accent }} />
+          }
+        </span>
+        {hasDetail && (
+          <span className="tool-activity-expand" style={{ color: c.accent }}>
+            {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+          </span>
+        )}
+      </div>
+      {expanded && hasDetail && (
+        <pre className="tool-activity-body">{event.input}</pre>
+      )}
+    </div>
+  )
+}
+
+// ── Live Agent Thinking Card ─────────────────────────────────────────────────
+function AgentThinkingCard() {
+  return (
+    <div className="agent-thinking-card">
+      <div className="agent-thinking-avatar">
+        <Sparkles size={12} />
+      </div>
+      <div className="agent-thinking-body">
+        <div className="agent-thinking-dots">
+          <span /><span /><span />
+        </div>
+        <span className="agent-thinking-label">Agent is working…</span>
+      </div>
+    </div>
+  )
+}
 
 // --- Lightweight Markdown & Code Block Renderer ---
 function CodeBlock({ code, lang }) {
@@ -315,15 +562,52 @@ export default function App() {
       if (res.ok) {
         const state = await res.json()
         if (state && state.messages && state.messages.length > 0) {
-          const mapped = state.messages.map((m, idx) => ({
-            id: m.id || `msg-${idx}`,
-            sender: m.sender || (m.type === 'human' || m.role === 'user' ? 'user' : 'agent'),
-            time: m.time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            text: typeof m.text === 'string'
-              ? m.text
-              : (typeof m.content === 'string' ? m.content : JSON.stringify(m.content || m)),
-            attachments: m.attachments || [],
-          }))
+          const mapped = state.messages.map((m, idx) => {
+            // Determine sender
+            const sender = m.sender
+              || (m.type === 'human' || m.role === 'user' ? 'user' : 'agent')
+
+            // Detect tool call / tool result messages and convert to [TOOL] markup
+            const isToolMsg = m.type === 'tool' || m.type === 'tool_result'
+              || m.type === 'function_call' || m.type === 'tool_call'
+              || m.role === 'tool'
+
+            let text = ''
+            if (isToolMsg) {
+              const toolName = m.tool_name || m.name || m.type || 'tool'
+              const toolInput = m.tool_input || m.input || m.arguments || ''
+              const toolOutput = m.tool_output || m.output || m.content || ''
+              const inputStr = typeof toolInput === 'object'
+                ? JSON.stringify(toolInput, null, 2)
+                : String(toolInput || '')
+              const outputStr = typeof toolOutput === 'object'
+                ? JSON.stringify(toolOutput, null, 2)
+                : String(toolOutput || '')
+              // Only show the summary target (first meaningful line), not full file content
+              const summaryLine = inputStr.split('\n')[0].replace(/['"{}]/g, '').trim().slice(0, 100)
+              text = `[TOOL:${toolName}]${summaryLine}[/TOOL]`
+              // Append brief output summary if it's not a massive file dump
+              if (outputStr && outputStr.length < 500) {
+                text += `\n${outputStr}`
+              } else if (outputStr) {
+                text += `\n_(${outputStr.split('\n').length} lines analyzed)_`
+              }
+            } else {
+              text = typeof m.text === 'string'
+                ? m.text
+                : (typeof m.content === 'string'
+                  ? m.content
+                  : JSON.stringify(m.content || m))
+            }
+
+            return {
+              id: m.id || `msg-${idx}`,
+              sender,
+              time: m.time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              text,
+              attachments: m.attachments || [],
+            }
+          })
           setMessages(prev => {
             if (prev.length !== mapped.length) return mapped
             const lastPrev = prev[prev.length - 1]?.text
@@ -451,8 +735,24 @@ export default function App() {
     const controller = new AbortController()
     runAbortControllerRef.current = controller
 
+    // Create a live agent message that accumulates tool cards + final text
+    const agentMsgId = `agent-${Date.now()}`
+    const agentMsgTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+
+    // toolEvents: array of {type:'tool_call'|'tool_result', tool, input?, output?, id, lines?}
+    // finalText: the final prose response
+    // We store these directly in the message as structured data
+    setMessages(prev => [...prev, {
+      id: agentMsgId,
+      sender: 'agent',
+      time: agentMsgTime,
+      text: '',
+      toolEvents: [],
+      streaming: true,
+    }])
+
     try {
-      const res = await fetch(`${API_BASE}/runs`, {
+      const res = await fetch(`${API_BASE}/runs/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
@@ -463,32 +763,83 @@ export default function App() {
         }),
       })
 
-      const data = await res.json()
-      setIsRunning(false)
-
-      if (data.status === 'interrupted' || data.ask_approval) {
-        setPendingApproval({
-          threadId: activeSessionId,
-          description: data.description || 'Action triggered an "ask" rule in permissions.json',
-          action: data.action || 'Shell / File modification',
-        })
-      } else {
-        const agentMsg = {
-          id: `agent-${Date.now()}`,
-          sender: 'agent',
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          text: data.output || data.response || (typeof data === 'object' ? JSON.stringify(data, null, 2) : String(data)),
-        }
-        setMessages(prev => [...prev, agentMsg])
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`)
       }
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() // keep incomplete line
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const jsonStr = line.slice(6).trim()
+          if (!jsonStr) continue
+
+          let evt
+          try { evt = JSON.parse(jsonStr) } catch { continue }
+
+          if (evt.type === 'tool_call') {
+            setMessages(prev => prev.map(m => m.id === agentMsgId
+              ? { ...m, toolEvents: [...(m.toolEvents || []), { ...evt, done: false }] }
+              : m
+            ))
+          } else if (evt.type === 'tool_result') {
+            setMessages(prev => prev.map(m => {
+              if (m.id !== agentMsgId) return m
+              const events = [...(m.toolEvents || [])]
+              // Mark matching tool_call as done and attach result summary
+              const callIdx = events.findLastIndex?.(e => e.type === 'tool_call' && e.id === evt.id && !e.done)
+              if (callIdx !== undefined && callIdx >= 0) {
+                events[callIdx] = { ...events[callIdx], done: true, resultSummary: evt.output, lines: evt.lines }
+              } else {
+                events.push({ ...evt, done: true })
+              }
+              return { ...m, toolEvents: events }
+            }))
+          } else if (evt.type === 'text_delta') {
+            setMessages(prev => prev.map(m => m.id === agentMsgId
+              ? { ...m, text: (m.text || '') + evt.text }
+              : m
+            ))
+          } else if (evt.type === 'done') {
+            setIsRunning(false)
+            setMessages(prev => prev.map(m => m.id === agentMsgId
+              ? { ...m, text: evt.output || m.text || 'Task completed.', streaming: false }
+              : m
+            ))
+            if (evt.status === 'interrupted' || evt.ask_approval) {
+              setPendingApproval({
+                threadId: activeSessionId,
+                description: evt.description || 'Action triggered an "ask" rule in permissions.json',
+                action: evt.action || 'Shell / File modification',
+              })
+            }
+            fetchFiles()
+          }
+        }
+      }
+
+      // Ensure streaming flag is cleared
+      setIsRunning(false)
+      setMessages(prev => prev.map(m => m.id === agentMsgId ? { ...m, streaming: false } : m))
       fetchFiles()
+
     } catch (err) {
       setIsRunning(false)
+      setMessages(prev => prev.map(m => m.id === agentMsgId ? { ...m, streaming: false } : m))
       if (err.name === 'AbortError') return
 
       const isFetchFail = err.message && err.message.toLowerCase().includes('fetch')
       if (isFetchFail) {
-        // Auto-request VS Code extension host to boot the API server immediately
         try {
           if (typeof window !== 'undefined' && window.acquireVsCodeApi) {
             window.vscodeApi = window.vscodeApi || window.acquireVsCodeApi();
@@ -502,17 +853,13 @@ export default function App() {
           `*(If needed, run manually: \`Ctrl+Shift+P\` → \`AI Coding Agent: Start API Server\`)*`
         : `⚠️ **Request Execution Error:** ${err.message}`
 
-      setMessages(prev => [
-        ...prev,
-        {
-          id: `err-${Date.now()}`,
-          sender: 'agent',
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          text: errorText,
-        },
-      ])
+      setMessages(prev => prev.map(m => m.id === agentMsgId
+        ? { ...m, text: errorText, streaming: false }
+        : m
+      ))
     }
   }
+
 
   const handleApproval = async (approved) => {
     if (!pendingApproval) return
@@ -810,39 +1157,72 @@ export default function App() {
           </div>
         ) : (
           <div className="chat-scroll">
-            {messages.map(msg => (
-              <div key={msg.id} className={`message-item ${msg.sender === 'user' ? 'from-user' : 'from-agent'}`}>
-                <div className={`message-avatar ${msg.sender === 'user' ? 'avatar-user' : 'avatar-agent'}`}>
-                  {msg.sender === 'user' ? 'U' : <Sparkles size={14} />}
-                </div>
+            {messages.map(msg => {
+              const parts = msg.sender === 'agent' ? parseMessageParts(msg.text) : null
+              const hasToolParts = parts && parts.some(p => p.type === 'tool')
 
-                <div className="message-content-wrapper">
-                  <div className="message-meta">
-                    <span className="message-sender">{msg.sender === 'user' ? 'You' : 'Coding Agent'}</span>
-                    <span className="message-time">{msg.time}</span>
+              return (
+                <div key={msg.id} className={`message-item ${msg.sender === 'user' ? 'from-user' : 'from-agent'}`}>
+                  <div className={`message-avatar ${msg.sender === 'user' ? 'avatar-user' : 'avatar-agent'}`}>
+                    {msg.sender === 'user' ? 'U' : <Sparkles size={14} />}
                   </div>
 
-                  <div className="message-bubble">
-                    {msg.attachments && msg.attachments.length > 0 && (
-                      <div className="message-attachments-preview">
-                        {msg.attachments.map(att => (
-                          <div key={att.id} className="message-att-item">
-                            {att.type === 'image' ? (
-                              <img src={att.dataUrl} alt={att.name} className="message-att-thumb" />
-                            ) : (
-                              <File size={12} />
-                            )}
-                            <span className="message-att-name">{att.name}</span>
+                  <div className="message-content-wrapper">
+                    <div className="message-meta">
+                      <span className="message-sender">{msg.sender === 'user' ? 'You' : 'Coding Agent'}</span>
+                      <span className="message-time">{msg.time}</span>
+                    </div>
+
+                    {/* User messages: plain bubble */}
+                    {msg.sender === 'user' && (
+                      <div className="message-bubble">
+                        {msg.attachments && msg.attachments.length > 0 && (
+                          <div className="message-attachments-preview">
+                            {msg.attachments.map(att => (
+                              <div key={att.id} className="message-att-item">
+                                {att.type === 'image' ? (
+                                  <img src={att.dataUrl} alt={att.name} className="message-att-thumb" />
+                                ) : (
+                                  <File size={12} />
+                                )}
+                                <span className="message-att-name">{att.name}</span>
+                              </div>
+                            ))}
                           </div>
-                        ))}
+                        )}
+                        <FormattedContent content={msg.text} />
                       </div>
                     )}
 
-                    <FormattedContent content={msg.text} />
+                    {/* Agent messages: live tool event cards + prose */}
+                    {msg.sender === 'agent' && (
+                      <div className="agent-message-parts">
+                        {/* Live SSE tool events */}
+                        {(msg.toolEvents || []).map((evt, ei) => (
+                          <ToolActivityCard key={`${evt.id || ei}-${evt.type}`} event={evt} />
+                        ))}
+                        {/* Streaming thinking indicator */}
+                        {msg.streaming && (msg.toolEvents || []).length === 0 && (
+                          <AgentThinkingCard />
+                        )}
+                        {/* Final prose response */}
+                        {msg.text && (
+                          <div className="message-bubble">
+                            <FormattedContent content={msg.text} />
+                          </div>
+                        )}
+                        {/* Fallback: old-style [TOOL:] text parsing */}
+                        {!msg.toolEvents && !msg.streaming && !msg.text && (
+                          <div className="message-bubble">
+                            <FormattedContent content={msg.text} />
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
 
             {/* Pending HITL Approval Gate Card */}
             {pendingApproval && (
@@ -870,12 +1250,7 @@ export default function App() {
               </div>
             )}
 
-            {isRunning && (
-              <div className="running-indicator">
-                <RefreshCw size={13} className="spin-icon" />
-                <span>Agent planning and executing in workspace...</span>
-              </div>
-            )}
+            {isRunning && <AgentThinkingCard />}
 
             <div ref={chatEndRef} />
           </div>
@@ -948,9 +1323,9 @@ export default function App() {
                     onChange={(e) => setSelectedModel(e.target.value)}
                   >
                     <option value="groq:qwen/qwen3.8-27b">qwen/qwen3.8-27b (Groq)</option>
-                    <option value="ollama:gpt-oss:120b-cloud">gpt-oss:120b-cloud</option>
-                    <option value="ollama:nemotron-3-super:cloud">nemotron-super-cloud</option>
                     <option value="ollama:gemma4:cloud">gemma4:cloud</option>
+                    <option value="ollama:nvidia-nemotron-3-super:cloud">nvidia-nemotron-3-super:cloud</option>
+                    <option value="ollama:gpt-oss:120b-cloud">gpt-oss-120b:cloud</option>
                   </select>
                 </div>
               </div>

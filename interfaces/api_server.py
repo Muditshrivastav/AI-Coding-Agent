@@ -86,6 +86,26 @@ async def health_check() -> dict[str, Any]:
     }
 
 
+@app.get("/models")
+async def get_models() -> dict[str, Any]:
+    """Return all supported LLM models and default active model."""
+    from agent.core import SUPPORTED_MODELS
+    global harness
+    current_model = harness.model if harness else "groq:qwen/qwen3.8-27b"
+    return {
+        "current_model": current_model,
+        "models": [
+            {
+                "id": m["id"],
+                "name": m["name"],
+                "label": m["label"],
+                "provider": m["provider"],
+            }
+            for m in SUPPORTED_MODELS.values()
+        ],
+    }
+
+
 class SetWorkspaceRequest(BaseModel):
     root_dir: str
 
@@ -210,7 +230,7 @@ async def start_run(req: RunRequest) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Harness not initialized.")
 
     thread_id = req.thread_id or str(uuid.uuid4())
-    
+
     # Persist the user message immediately into session storage
     harness.sessions.save_message(thread_id, sender="user", text=req.user_request)
 
@@ -222,16 +242,42 @@ async def start_run(req: RunRequest) -> dict[str, Any]:
 
     try:
         result = await task
-        # Extract agent response text and save to persistent session storage
-        output_text = (
-            result.get("output")
-            or result.get("response")
-            or (str(result.get("result")) if result.get("result") else None)
-            or "Task completed."
-        )
+
+        # Extract agent response text from LangGraph AgentState:
+        # The result is typically {"status": "complete", "result": AgentState}
+        # AgentState has a "messages" list of LangChain message objects.
+        output_text = None
+        inner = result.get("result") or result  # unwrap if wrapped in {status, result}
+        if isinstance(inner, dict):
+            msgs = inner.get("messages") or []
+            # Walk messages from the end and find the last AI/assistant message
+            for m in reversed(msgs):
+                role = getattr(m, "type", None) or getattr(m, "role", None) or ""
+                if role in ("ai", "assistant"):
+                    content = getattr(m, "content", None)
+                    if isinstance(content, str) and content.strip():
+                        output_text = content.strip()
+                        break
+                    elif isinstance(content, list):
+                        # Content can be a list of blocks [{type: text, text: ...}]
+                        parts = [b.get("text", "") if isinstance(b, dict) else str(b) for b in content]
+                        joined = " ".join(p for p in parts if p).strip()
+                        if joined:
+                            output_text = joined
+                            break
+
+        if output_text is None:
+            # Fallback: legacy output/response keys
+            output_text = (
+                result.get("output")
+                or result.get("response")
+                or (str(result.get("result")) if result.get("result") else None)
+                or "Task completed."
+            )
+
         if result.get("status") != "awaiting_approval":
             harness.sessions.save_message(thread_id, sender="agent", text=output_text)
-        return {"thread_id": thread_id, **result}
+        return {"thread_id": thread_id, "output": output_text, **{k: v for k, v in result.items() if k != "result"}}
     except asyncio.CancelledError:
         logger.info(f"🛑 Run on thread {thread_id} was cancelled by user.")
         harness.sessions.save_message(thread_id, sender="agent", text="🛑 Execution stopped by user.")
@@ -242,6 +288,172 @@ async def start_run(req: RunRequest) -> dict[str, Any]:
         }
     finally:
         active_run_tasks.pop(thread_id, None)
+
+import json as _json
+
+
+class StreamRunRequest(BaseModel):
+    user_request: str
+    thread_id: str | None = None
+    model: str | None = None
+
+
+@app.post("/runs/stream")
+async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
+    """Run the agent and stream SSE events for tool calls + final response.
+
+    Event types emitted:
+      data: {"type": "tool_call",   "tool": "<name>", "input": "<summary>", "id": "<id>"}
+      data: {"type": "tool_result", "tool": "<name>", "output": "<summary>", "id": "<id>", "lines": N}
+      data: {"type": "text_delta",  "text": "<chunk>"}
+      data: {"type": "done",        "output": "<full text>", "status": "complete|stopped|error"}
+    """
+    global harness
+    if harness is None:
+        raise HTTPException(status_code=500, detail="Harness not initialized.")
+
+    thread_id = req.thread_id or str(uuid.uuid4())
+    harness.sessions.save_message(thread_id, sender="user", text=req.user_request)
+
+    async def event_generator():
+        output_text = ""
+        try:
+            config = {"configurable": {"thread_id": thread_id}}
+
+            from agent.state import create_initial_state
+            existing_state = await harness.get_state(thread_id)
+            if existing_state and "messages" in existing_state:
+                input_payload = {"messages": [{"role": "user", "content": req.user_request}]}
+            else:
+                input_payload = create_initial_state(req.user_request)
+
+            if not harness.sessions.has_session(thread_id):
+                title_preview = req.user_request.strip().split("\n")[0][:40]
+                harness.sessions.create_session(title=title_preview or f"Session {thread_id[:8]}", session_id=thread_id)
+
+            from agent.core import normalize_model_identifier
+            from frameworks.agents_md_writer import generate_agents_md
+            chosen_model = normalize_model_identifier(req.model) if req.model else harness._model
+            await generate_agents_md(
+                user_request=req.user_request,
+                root_dir=harness.root_dir,
+                model=chosen_model,
+            )
+
+            agent_to_invoke = harness._agent
+            if chosen_model != harness._model:
+                from nodes.build_subagent import build_dev_subagent
+                from nodes.planning_subagent import planning_subagent
+                from nodes.design_subagent import design_subagent
+                from agent.state import AgentState
+                subagents = [
+                    planning_subagent,
+                    design_subagent,
+                    build_dev_subagent(
+                        harness._tools,
+                        external_tools=harness._external_tools,
+                        root_dir=harness.root_dir,
+                        backend=harness._backend.backend,
+                        guard=harness._guard,
+                    ),
+                ]
+                agent_to_invoke = harness._backend.build_agent(
+                    model=chosen_model,
+                    subagents=subagents,
+                    system_prompt=(
+                        "You are an autonomous coding harness agent. Always follow AGENTS.md, "
+                        "respect permissions.json, coordinate planning -> design -> build, and verify all code."
+                    ),
+                    checkpointer=harness._runtime.checkpointer,
+                    state_schema=AgentState,
+                )
+
+            task = asyncio.create_task(
+                agent_to_invoke.ainvoke(input_payload, config=config)
+            )
+            active_run_tasks[thread_id] = task
+
+            # Poll the LangGraph stream in parallel for tool events
+            async def stream_events():
+                nonlocal output_text
+                try:
+                    async for chunk in agent_to_invoke.astream(
+                        input_payload, config=config, stream_mode="updates"
+                    ):
+                        # chunk is a dict: {node_name: state_update}
+                        for node_name, update in (chunk.items() if isinstance(chunk, dict) else []):
+                            msgs = update.get("messages", []) if isinstance(update, dict) else []
+                            for m in (msgs if isinstance(msgs, list) else []):
+                                mtype = getattr(m, "type", "") or ""
+                                if mtype == "tool":
+                                    name = getattr(m, "name", "tool") or "tool"
+                                    raw_content = getattr(m, "content", "") or ""
+                                    content_str = raw_content if isinstance(raw_content, str) else _json.dumps(raw_content)
+                                    lines = content_str.count("\n") + 1
+                                    # Show only a brief summary, never the full file dump
+                                    summary = content_str.split("\n")[0][:120] if content_str else ""
+                                    tool_id = getattr(m, "tool_call_id", "") or ""
+                                    ev = _json.dumps({"type": "tool_result", "tool": name, "output": summary, "id": tool_id, "lines": lines})
+                                    yield f"data: {ev}\n\n"
+                                elif mtype == "ai":
+                                    tool_calls = getattr(m, "tool_calls", []) or []
+                                    for tc in tool_calls:
+                                        tc_name = tc.get("name", "tool") if isinstance(tc, dict) else getattr(tc, "name", "tool")
+                                        tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                                        tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+                                        args_str = _json.dumps(tc_args) if isinstance(tc_args, dict) else str(tc_args)
+                                        summary = args_str[:120]
+                                        ev = _json.dumps({"type": "tool_call", "tool": tc_name, "input": summary, "id": tc_id})
+                                        yield f"data: {ev}\n\n"
+                                    content = getattr(m, "content", "") or ""
+                                    if isinstance(content, str) and content.strip() and not tool_calls:
+                                        output_text = content.strip()
+                                        ev = _json.dumps({"type": "text_delta", "text": content})
+                                        yield f"data: {ev}\n\n"
+                except Exception as se:
+                    logger.warning(f"Stream events error: {se}")
+
+            async for ev in stream_events():
+                yield ev
+
+            # Ensure the ainvoke task finishes
+            try:
+                result = await asyncio.wait_for(task, timeout=300)
+                harness.sessions.update_session(thread_id, status="active")
+                await harness._runtime.persist_session_to_memory(thread_id)
+
+                # Extract final AI text if stream didn't capture it
+                if not output_text:
+                    inner = result.get("result") or result
+                    if isinstance(inner, dict):
+                        for msg in reversed(inner.get("messages", [])):
+                            role = getattr(msg, "type", "") or getattr(msg, "role", "")
+                            if role in ("ai", "assistant"):
+                                ct = getattr(msg, "content", "") or ""
+                                if isinstance(ct, str) and ct.strip():
+                                    output_text = ct.strip()
+                                    break
+                    if not output_text:
+                        output_text = result.get("output") or result.get("response") or "Task completed."
+
+                harness.sessions.save_message(thread_id, sender="agent", text=output_text)
+                done_ev = _json.dumps({"type": "done", "output": output_text, "status": "complete"})
+                yield f"data: {done_ev}\n\n"
+
+            except asyncio.CancelledError:
+                harness.sessions.save_message(thread_id, sender="agent", text="🛑 Execution stopped by user.")
+                done_ev = _json.dumps({"type": "done", "output": "🛑 Execution stopped by user.", "status": "stopped"})
+                yield f"data: {done_ev}\n\n"
+
+        except Exception as exc:
+            import traceback
+            logger.error(f"Stream run error: {exc}\n{traceback.format_exc()}")
+            err_ev = _json.dumps({"type": "done", "output": f"⚠️ Agent error: {exc}", "status": "error"})
+            yield f"data: {err_ev}\n\n"
+        finally:
+            active_run_tasks.pop(thread_id, None)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.post("/runs/{thread_id}/stop")
