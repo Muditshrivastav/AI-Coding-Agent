@@ -65,7 +65,7 @@ async def startup_event() -> None:
         from agent.core import CodingAgentHarness
         root_dir = resolve_workspace_root()
         logger.info(f"🗂️  Agent workspace root resolved to: {root_dir}")
-        harness = CodingAgentHarness(root_dir=root_dir, tools=[], sandbox_mode="local")
+        harness = CodingAgentHarness(root_dir=root_dir, tools=None, sandbox_mode="local")
         logger.info("✅ CodingAgentHarness initialized successfully (sandbox_mode=local).")
     except Exception as exc:
         import traceback
