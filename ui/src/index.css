@@ -954,7 +954,8 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .input-controls-left {
@@ -962,7 +963,62 @@ html, body {
   align-items: center;
   gap: 6px;
   min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
+}
+
+.input-controls-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* ── Dock Model Selector ── */
+.dock-model-selector {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 3px 7px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+}
+
+.dock-model-selector:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--border-color-active);
+}
+
+.model-icon {
+  color: var(--accent-cyan);
+  flex-shrink: 0;
+}
+
+.dock-model-dropdown {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  outline: none;
+  cursor: pointer;
+  min-width: 0;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dock-model-dropdown option {
+  background: var(--bg-secondary);
+  color: var(--text-main);
+  font-size: 11px;
 }
 
 .attach-btn {
@@ -1056,4 +1112,42 @@ html, body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.2);
+}
+
+/* ── Responsive Input Bar ── */
+@media (max-width: 520px) {
+  .dock-model-selector {
+    max-width: 120px;
+  }
+
+  .dock-model-dropdown {
+    max-width: 80px;
+    font-size: 10.5px;
+  }
+
+  .workspace-badge span {
+    display: none;
+  }
+
+  .workspace-badge {
+    padding: 2px 4px;
+  }
+
+  .send-btn-label {
+    display: none;
+  }
+
+  .send-btn {
+    padding: 5px 8px;
+  }
+}
+
+@media (max-width: 360px) {
+  .dock-model-selector {
+    display: none;
+  }
+
+  .workspace-badge {
+    display: none;
+  }
 }

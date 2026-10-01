@@ -284,53 +284,6 @@ export default function App() {
     }
   }
 
-  const handleFileSelect = (e) => {
-    const files = Array.from(e.target.files || [])
-    if (!files.length) return
-
-    files.forEach(file => {
-      const isImg = file.type.startsWith('image/')
-      const reader = new FileReader()
-
-      if (isImg) {
-        reader.onload = (event) => {
-          setAttachments(prev => [
-            ...prev,
-            {
-              id: `att-${Date.now()}-${Math.random()}`,
-              name: file.name,
-              type: 'image',
-              size: file.size,
-              dataUrl: event.target.result,
-            }
-          ])
-        }
-        reader.readAsDataURL(file)
-      } else {
-        // Read as text snippet if possible (code / config / text files)
-        reader.onload = (event) => {
-          setAttachments(prev => [
-            ...prev,
-            {
-              id: `att-${Date.now()}-${Math.random()}`,
-              name: file.name,
-              type: 'file',
-              size: file.size,
-              content: event.target.result,
-            }
-          ])
-        }
-        reader.readAsText(file)
-      }
-    })
-
-    // Reset input so re-selecting same file triggers onChange
-    if (e.target) e.target.value = ''
-  }
-
-  const handleRemoveAttachment = (id) => {
-    setAttachments(prev => prev.filter(a => a.id !== id))
-  }
 
   const handleDeleteSession = async (id, e) => {
     e.stopPropagation()
@@ -691,12 +644,14 @@ export default function App() {
 
   return (
     <div className="app-container">
-      {/* 1. Left Sidebar: Antigravity Session Tree & Workspaces */}
-      <aside className="sidebar">
-        <div className="sidebar-header">
-          <div className="logo-badge">
-            <div className="logo-icon-wrap">
+      {/* Top ACP Header */}
+      <header className="acp-header">
+        <div className="acp-header-top">
+          <div className="acp-brand">
+            <div className="acp-brand-icon">
               <Sparkles size={16} />
+            </div>
+            <span>Coding Agent</span>
           </div>
 
           <div className="acp-header-actions">
@@ -731,24 +686,15 @@ export default function App() {
           </div>
         </div>
 
-        <button className="btn-new-chat" onClick={() => handleCreateSession()}>
-          <Plus size={15} />
-          <span>New Session</span>
+        <div className="acp-header-meta">
+          <div className="acp-status-pill">
+            <span className={`status-dot ${isOnline ? 'online' : 'offline'}`} />
+            <span>{isOnline ? 'Backend Connected' : 'Offline'}</span>
+            {!isOnline && (
+              <button className="btn-reconnect" onClick={handleConnect} title="Retry backend connection">
+                Retry
               </button>
-
-          <div className="acp-model-wrap">
-            <Cpu size={12} className="model-icon" />
-            <select
-              className="acp-model-dropdown"
-              value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value)}
-              title="Select AI Model"
-            >
-              <option value="groq:qwen/qwen3.8-27b">qwen3.8-27b (Groq)</option>
-              <option value="ollama:gpt-oss:120b-cloud">gpt-oss:120b-cloud</option>
-              <option value="ollama:nemotron-3-super:cloud">nemotron-super-cloud</option>
-              <option value="ollama:gemma4:cloud">gemma4:cloud</option>
-            </select>
+            )}
           </div>
         </div>
       </header>
@@ -989,32 +935,49 @@ export default function App() {
                   type="button"
                   className="attach-btn"
                   onClick={() => fileInputRef.current?.click()}
-                  title="Attach file or screenshot"
+                  title="Attach file or screenshot (+)"
                 >
-                  <Paperclip size={14} />
+                  <Plus size={15} />
                 </button>
+
+                <div className="dock-model-selector" title="Choose AI Model">
+                  <Cpu size={12} className="model-icon" />
+                  <select
+                    className="dock-model-dropdown"
+                    value={selectedModel}
+                    onChange={(e) => setSelectedModel(e.target.value)}
+                  >
+                    <option value="groq:qwen/qwen3.8-27b">qwen/qwen3.8-27b (Groq)</option>
+                    <option value="ollama:gpt-oss:120b-cloud">gpt-oss:120b-cloud</option>
+                    <option value="ollama:nemotron-3-super:cloud">nemotron-super-cloud</option>
+                    <option value="ollama:gemma4:cloud">gemma4:cloud</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="input-controls-right">
                 {workspaceInfo && (
                   <span className="workspace-badge" title={workspaceInfo.workspace_root}>
                     <Folder size={11} />
                     <span>{workspaceInfo.workspace_name}</span>
                   </span>
                 )}
-              </div>
 
-              <button
-                type={isRunning ? 'button' : 'submit'}
-                className={`send-btn ${isRunning ? 'stop-btn' : ''}`}
-                onClick={isRunning ? handleStopRun : undefined}
-                disabled={!isRunning && !prompt.trim() && attachments.length === 0}
-                title={isRunning ? 'Stop Execution' : 'Send Command'}
-              >
-                {isRunning ? (
-                  <Square size={13} fill="currentColor" />
-                ) : (
-                  <Play size={13} fill="currentColor" />
-                )}
-                <span>{isRunning ? 'Stop' : 'Send'}</span>
-              </button>
+                <button
+                  type={isRunning ? 'button' : 'submit'}
+                  className={`send-btn ${isRunning ? 'stop-btn' : ''}`}
+                  onClick={isRunning ? handleStopRun : undefined}
+                  disabled={!isRunning && !prompt.trim() && attachments.length === 0}
+                  title={isRunning ? 'Stop Execution' : 'Send Command'}
+                >
+                  {isRunning ? (
+                    <Square size={13} fill="currentColor" />
+                  ) : (
+                    <Play size={13} fill="currentColor" />
+                  )}
+                  <span className="send-btn-label">{isRunning ? 'Stop' : 'Send'}</span>
+                </button>
+              </div>
             </div>
           </form>
         </div>
