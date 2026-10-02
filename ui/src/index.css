@@ -1305,3 +1305,106 @@ html, body {
     display: none;
   }
 }
+
+/* ── Groq Rate-Limit Banner ──────────────────────────────────────────────── */
+.rate-limit-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 9999;
+  padding: 10px 14px;
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.18) 0%, rgba(234, 88, 12, 0.14) 100%);
+  border-bottom: 1px solid rgba(245, 158, 11, 0.4);
+  backdrop-filter: blur(12px);
+  animation: rl-slide-in 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes rl-slide-in {
+  from { transform: translateY(-100%); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+
+.rate-limit-banner-inner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.rate-limit-icon {
+  color: var(--accent-amber);
+  flex-shrink: 0;
+  animation: rl-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes rl-pulse {
+  0%, 100% { opacity: 1;   transform: scale(1);    }
+  50%       { opacity: 0.6; transform: scale(1.15); }
+}
+
+.rate-limit-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.rate-limit-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent-amber);
+  letter-spacing: 0.02em;
+}
+
+.rate-limit-msg {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rate-limit-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.rate-limit-switch-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(245, 158, 11, 0.18);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  border-radius: 6px;
+  color: var(--accent-amber);
+  cursor: pointer;
+  transition: background 0.18s, border-color 0.18s, transform 0.12s;
+  white-space: nowrap;
+}
+
+.rate-limit-switch-btn:hover {
+  background: rgba(245, 158, 11, 0.32);
+  border-color: rgba(245, 158, 11, 0.7);
+  transform: translateY(-1px);
+}
+
+.rate-limit-dismiss {
+  padding: 4px;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s;
+  flex-shrink: 0;
+}
+
+.rate-limit-dismiss:hover {
+  color: var(--text-muted);
+}

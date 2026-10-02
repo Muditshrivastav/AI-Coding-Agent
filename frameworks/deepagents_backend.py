@@ -364,7 +364,10 @@ class DeepAgentsBackend:
             from langchain_groq import ChatGroq
             from langchain_ollama import ChatOllama
             bare_model = model[len("ollama:"):]
-            resolved_model = ChatOllama(model=bare_model, temperature=0.2)
+            # num_ctx=8192 ensures tool schemas + conversation history fit in context;
+            # the Ollama default (2048) causes tool definitions to be silently truncated,
+            # which is the primary reason tool-calling fails when switching to Ollama models.
+            resolved_model = ChatOllama(model=bare_model, temperature=0.2, num_ctx=8192)
             fallback_model = ChatGroq(model="qwen/qwen3.8-27b", temperature=0.2)
         else:
             resolved_model = model

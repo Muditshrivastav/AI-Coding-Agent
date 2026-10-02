@@ -37,7 +37,8 @@ import {
   Search,
   FolderSearch,
   Wrench,
-  Zap
+  Zap,
+  AlertTriangle
 } from 'lucide-react'
 
 const API_BASE = 'http://127.0.0.1:8000'
@@ -406,6 +407,8 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState('groq:qwen/qwen3.8-27b')
   const [isOnline, setIsOnline] = useState(false)
   const [activeDrawer, setActiveDrawer] = useState(null) // null | 'sessions' | 'workspace'
+  // Groq rate-limit banner: null | { message, fallbacks }
+  const [rateLimitBanner, setRateLimitBanner] = useState(null)
   
   const fileInputRef = useRef(null)
   const textareaRef = useRef(null)
@@ -810,6 +813,9 @@ export default function App() {
               ? { ...m, text: (m.text || '') + evt.text }
               : m
             ))
+          } else if (evt.type === 'rate_limit') {
+            // Groq 429 — show the rate-limit banner so the user can switch to Ollama
+            setRateLimitBanner({ message: evt.message, fallbacks: evt.fallbacks || [] })
           } else if (evt.type === 'done') {
             setIsRunning(false)
             setMessages(prev => prev.map(m => m.id === agentMsgId
@@ -991,6 +997,40 @@ export default function App() {
 
   return (
     <div className="app-container">
+      {/* ── Groq Rate-Limit Banner ── */}
+      {rateLimitBanner && (
+        <div className="rate-limit-banner">
+          <div className="rate-limit-banner-inner">
+            <AlertTriangle size={16} className="rate-limit-icon" />
+            <div className="rate-limit-body">
+              <span className="rate-limit-title">Groq Token Rate Limit Reached</span>
+              <span className="rate-limit-msg">{rateLimitBanner.message}</span>
+            </div>
+            <div className="rate-limit-actions">
+              {(rateLimitBanner.fallbacks || []).map(fb => (
+                <button
+                  key={fb.id}
+                  className="rate-limit-switch-btn"
+                  onClick={() => {
+                    setSelectedModel(fb.id)
+                    setRateLimitBanner(null)
+                  }}
+                  title={`Switch to ${fb.label}`}
+                >
+                  ⚡ {fb.label}
+                </button>
+              ))}
+            </div>
+            <button
+              className="rate-limit-dismiss"
+              onClick={() => setRateLimitBanner(null)}
+              title="Dismiss"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+      )}
       {/* Top ACP Header */}
       <header className="acp-header">
         <div className="acp-header-top">

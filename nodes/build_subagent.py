@@ -281,6 +281,7 @@ async def get_build_dev_tools(
     return tools, ext_mgr, clients
 
 
+
 async def make_build_subagent(
     root_dir: str = ".",
     model: str = "qwen/qwen3.8-27b",
@@ -307,7 +308,7 @@ async def make_build_subagent(
         (deep_agent, external_tools_manager, active_mcp_clients)
     """
     primary_llm = ChatGroq(model=model, temperature=temperature)
-    fallback_llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=temperature)
+    fallback_llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=temperature, num_ctx=8192)
     llm = primary_llm.with_fallbacks([fallback_llm])
     backend = LocalShellBackend(root_dir=root_dir)
 

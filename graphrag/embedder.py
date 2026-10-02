@@ -33,41 +33,46 @@ class BaseEmbedder(ABC):
 
 class DefaultEmbedder(BaseEmbedder):
     """
-    Uses langchain-huggingface HuggingFaceEmbeddings with Qwen/Qwen3-Embedding-0.6B.
+    Uses langchain-ollama OllamaEmbeddings with Qwen3-Embedding-4B.
     If unavailable or offline, computes deterministic normalized pseudo-embeddings
     to ensure tests and local environments run reliably without external downloads.
     """
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen3-Embedding-0.6B",
-        dimension: int = 1024,
+        model_name: str = "qwen3-embedding:4b",
+        dimension: int = 4096,
     ) -> None:
         self._model_name = model_name
         self._dim = dimension
         self._hf_embeddings = None
 
-        # Attempt to load langchain-huggingface HuggingFaceEmbeddings
+        # Attempt to load langchain-ollama OllamaEmbeddings
         try:
-            from langchain_huggingface import HuggingFaceEmbeddings
+            from langchain_ollama import OllamaEmbeddings
 
-            self._hf_embeddings = HuggingFaceEmbeddings(
-                model_name=model_name,
-                model_kwargs={"trust_remote_code": True},
-                encode_kwargs={"normalize_embeddings": True},
+            # Strip any accidental whitespace from model name before passing to Ollama
+            self._hf_embeddings = OllamaEmbeddings(
+                model=model_name.strip(),
             )
             # Detect dimension if possible
             sample_vec = self._hf_embeddings.embed_query("test")
             self._dim = len(sample_vec)
         except Exception:
-            # Fallback to sentence_transformers directly if available
-            try:
-                from sentence_transformers import SentenceTransformer
+            # Fallback to sentence_transformers — ONLY for HuggingFace-style model names.
+            # Never attempt a download for Ollama tags (e.g. "qwen3-embedding:4b") since
+            # SentenceTransformer would try to fetch from HuggingFace Hub and loop forever.
+            _looks_like_hf = "/" in model_name and ":" not in model_name
+            if _looks_like_hf:
+                try:
+                    from sentence_transformers import SentenceTransformer
 
-                st_model = SentenceTransformer(model_name, trust_remote_code=True)
-                self._dim = st_model.get_sentence_embedding_dimension()
-                self._hf_embeddings = st_model
-            except Exception:
+                    st_model = SentenceTransformer(model_name.strip(), trust_remote_code=True)
+                    self._dim = st_model.get_sentence_embedding_dimension()
+                    self._hf_embeddings = st_model
+                except Exception:
+                    self._hf_embeddings = None
+            else:
                 self._hf_embeddings = None
 
     @property

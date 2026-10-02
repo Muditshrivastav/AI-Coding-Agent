@@ -145,7 +145,7 @@ async def set_workspace(req: SetWorkspaceRequest) -> dict[str, Any]:
 
     try:
         from agent.core import CodingAgentHarness
-        harness = CodingAgentHarness(root_dir=new_root, tools=[], sandbox_mode="local")
+        harness = CodingAgentHarness(root_dir=new_root, tools=None, sandbox_mode="local")
         logger.info(f"🔄 Workspace hot-swapped → {new_root}")
         return {
             "status": "ok",
@@ -298,6 +298,61 @@ class StreamRunRequest(BaseModel):
     model: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Groq rate-limit helpers
+# ---------------------------------------------------------------------------
+
+def _is_groq_rate_limit(exc: Exception) -> bool:
+    """Return True when *exc* represents a Groq HTTP 429 rate-limit response.
+
+    Groq's Python SDK wraps the HTTP response as ``groq.RateLimitError`` or as
+    a generic ``httpx.HTTPStatusError`` / ``requests.HTTPError`` with status 429.
+    We also do a fallback string-match so that any future SDK change is still caught.
+    """
+    # 1. Exact status_code attribute (groq-sdk, httpx, requests)
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if status == 429:
+        return True
+
+    # 2. Nested response object (httpx / requests style)
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        if getattr(resp, "status_code", None) == 429:
+            return True
+
+    # 3. Class name contains "RateLimit"
+    if "ratelimit" in type(exc).__name__.lower():
+        return True
+
+    # 4. Fallback: scan the exception message for "429" or "rate limit"
+    msg = str(exc).lower()
+    if "429" in msg or "rate limit" in msg or "rate_limit" in msg:
+        return True
+
+    return False
+
+
+_OLLAMA_FALLBACKS = [
+    {"id": "ollama:gpt-oss:120b-cloud",            "label": "GPT-OSS 120B (Cloud)"},
+    {"id": "ollama:gemma4:cloud",                  "label": "Gemma 4 (Cloud)"},
+    {"id": "ollama:nvidia-nemotron-super:cloud",   "label": "NVIDIA Nemotron Super (Cloud)"},
+]
+
+
+def _make_rate_limit_event(current_model: str) -> dict:
+    """Build the SSE payload emitted when Groq returns a 429."""
+    return {
+        "type": "rate_limit",
+        "provider": "groq",
+        "current_model": current_model,
+        "message": (
+            "⚡ Groq rate limit hit (HTTP 429). You have exhausted your Groq token quota. "
+            "Switch to an Ollama model to continue without interruption."
+        ),
+        "fallbacks": _OLLAMA_FALLBACKS,
+    }
+
+
 @app.post("/runs/stream")
 async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
     """Run the agent and stream SSE events for tool calls + final response.
@@ -412,6 +467,9 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
                                         yield f"data: {ev}\n\n"
                 except Exception as se:
                     logger.warning(f"Stream events error: {se}")
+                    if _is_groq_rate_limit(se):
+                        rl_ev = _json.dumps(_make_rate_limit_event(chosen_model))
+                        yield f"data: {rl_ev}\n\n"
 
             async for ev in stream_events():
                 yield ev
@@ -448,8 +506,14 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
         except Exception as exc:
             import traceback
             logger.error(f"Stream run error: {exc}\n{traceback.format_exc()}")
-            err_ev = _json.dumps({"type": "done", "output": f"⚠️ Agent error: {exc}", "status": "error"})
-            yield f"data: {err_ev}\n\n"
+            if _is_groq_rate_limit(exc):
+                rl_ev = _json.dumps(_make_rate_limit_event(chosen_model))
+                yield f"data: {rl_ev}\n\n"
+                done_msg = "🚫 Groq rate limit reached. Please switch to an Ollama model to continue."
+                done_ev = _json.dumps({"type": "done", "output": done_msg, "status": "rate_limited"})
+            else:
+                done_ev = _json.dumps({"type": "done", "output": f"⚠️ Agent error: {exc}", "status": "error"})
+            yield f"data: {done_ev}\n\n"
         finally:
             active_run_tasks.pop(thread_id, None)
 
