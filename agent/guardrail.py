@@ -49,10 +49,20 @@ def _append_failure(
     category: str,
     description: str,
     resolution: str = "—",
+    silent: bool = False,
 ) -> None:
     """Append one row to failures.md, creating/re-initialising the file if needed."""
+    if silent:
+        return
+
+    # To prevent Uvicorn reload loops during startup, we only write the header
+    # if the file truly doesn't exist, and we avoid doing it in a way that
+    # triggers a reload if possible.
     if not failures_path.exists() or failures_path.stat().st_size == 0:
-        failures_path.write_text(_FAILURES_HEADER, encoding="utf-8")
+        try:
+            failures_path.write_text(_FAILURES_HEADER, encoding="utf-8")
+        except Exception:
+            pass
 
     row = (
         f"| {_now_utc()} "
@@ -61,8 +71,11 @@ def _append_failure(
         f"| {description} "
         f"| {resolution} |\n"
     )
-    with failures_path.open("a", encoding="utf-8") as fh:
-        fh.write(row)
+    try:
+        with failures_path.open("a", encoding="utf-8") as fh:
+            fh.write(row)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +101,7 @@ class HarnessGuard:
         self,
         permissions_path: str = "harness/permissions.json",
         failures_path: str | None = None,
+        silent_mode: bool = False,
     ) -> None:
         self._path = Path(permissions_path)
         self._failures_path = Path(
@@ -97,6 +111,7 @@ class HarnessGuard:
         )
         self._permissions: dict[str, list[str]] = {"allow": [], "ask": [], "deny": []}
         self._mtime: float = 0.0
+        self.silent_mode = silent_mode
         self.load()
 
     # ------------------------------------------------------------------

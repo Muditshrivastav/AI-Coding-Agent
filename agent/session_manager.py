@@ -40,13 +40,10 @@ class SessionManager:
     def __init__(self, root_dir: str = ".") -> None:
         self._root_dir = Path(root_dir)
         self._storage_dir = self._root_dir / "harness" / "sessions"
-        self._storage_dir.mkdir(parents=True, exist_ok=True)
         self._registry_path = self._storage_dir / "sessions.json"
         self._sessions: dict[str, SessionMetadata] = {}
-        if not self._registry_path.exists():
-            self._save()
-        else:
-            self._load()
+        # Lazy load registry; avoid creating directories/files on init to prevent Uvicorn reload loops
+        self._load()
 
     def _load(self) -> None:
         if not self._registry_path.exists():
@@ -62,6 +59,8 @@ class SessionManager:
 
     def _save(self) -> None:
         try:
+            # Ensure storage directory exists before writing
+            self._storage_dir.mkdir(parents=True, exist_ok=True)
             items = [asdict(meta) for meta in self._sessions.values()]
             with open(self._registry_path, "w", encoding="utf-8") as f:
                 json.dump(items, f, indent=2)

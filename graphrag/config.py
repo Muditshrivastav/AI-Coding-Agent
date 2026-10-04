@@ -37,8 +37,8 @@ class GraphRAGConfig:
     )
 
     # Retrieval & Reranker Settings
-    embedding_dimension: int = 1024
-    embedding_model_name: str = "Qwen/Qwen3-Embedding-0.6B"
+    embedding_dimension: int = 4096
+    embedding_model_name: str = "qwen3-embedding:4b"
     reranker_model_name: str = "BAAI/bge-reranker-base"
     vector_search_top_k: int = 20
     reranker_top_k: int = 5

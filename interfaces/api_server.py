@@ -18,6 +18,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Force the process to work within the project root to avoid CWD issues
+os.chdir(PROJECT_ROOT)
+
 from fastapi.middleware.cors import CORSMiddleware
 from frameworks.vscode_workspace import resolve_workspace_root
 from tools.github_oauth import vault, build_authorization_url, exchange_code_for_token
@@ -371,32 +374,37 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
     harness.sessions.save_message(thread_id, sender="user", text=req.user_request)
 
     async def event_generator():
+        # Local capture to satisfy type checker across closure boundary
+        active_harness = harness
+        if active_harness is None:
+            return
+            
         output_text = ""
         try:
             config = {"configurable": {"thread_id": thread_id}}
 
             from agent.state import create_initial_state
-            existing_state = await harness.get_state(thread_id)
+            existing_state = await active_harness.get_state(thread_id)
             if existing_state and "messages" in existing_state:
                 input_payload = {"messages": [{"role": "user", "content": req.user_request}]}
             else:
                 input_payload = create_initial_state(req.user_request)
 
-            if not harness.sessions.has_session(thread_id):
+            if not active_harness.sessions.has_session(thread_id):
                 title_preview = req.user_request.strip().split("\n")[0][:40]
-                harness.sessions.create_session(title=title_preview or f"Session {thread_id[:8]}", session_id=thread_id)
+                active_harness.sessions.create_session(title=title_preview or f"Session {thread_id[:8]}", session_id=thread_id)
 
             from agent.core import normalize_model_identifier
             from frameworks.agents_md_writer import generate_agents_md
-            chosen_model = normalize_model_identifier(req.model) if req.model else harness._model
+            chosen_model = normalize_model_identifier(req.model) if req.model else active_harness._model
             await generate_agents_md(
                 user_request=req.user_request,
-                root_dir=harness.root_dir,
+                root_dir=active_harness.root_dir,
                 model=chosen_model,
             )
 
-            agent_to_invoke = harness._agent
-            if chosen_model != harness._model:
+            agent_to_invoke = active_harness._agent
+            if chosen_model != active_harness._model:
                 from nodes.build_subagent import build_dev_subagent
                 from nodes.planning_subagent import planning_subagent
                 from nodes.design_subagent import design_subagent
@@ -405,21 +413,21 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
                     planning_subagent,
                     design_subagent,
                     build_dev_subagent(
-                        harness._tools,
-                        external_tools=harness._external_tools,
-                        root_dir=harness.root_dir,
-                        backend=harness._backend.backend,
-                        guard=harness._guard,
+                        active_harness._tools,
+                        external_tools=active_harness._external_tools,
+                        root_dir=active_harness.root_dir,
+                        backend=active_harness._backend.backend if hasattr(active_harness._backend, 'backend') else active_harness._backend,
+                        guard=active_harness._guard,
                     ),
                 ]
-                agent_to_invoke = harness._backend.build_agent(
+                agent_to_invoke = active_harness._backend.build_agent(
                     model=chosen_model,
                     subagents=subagents,
                     system_prompt=(
                         "You are an autonomous coding harness agent. Always follow AGENTS.md, "
                         "respect permissions.json, coordinate planning -> design -> build, and verify all code."
                     ),
-                    checkpointer=harness._runtime.checkpointer,
+                    checkpointer=active_harness._runtime.checkpointer,
                     state_schema=AgentState,
                 )
 
@@ -477,8 +485,8 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
             # Ensure the ainvoke task finishes
             try:
                 result = await asyncio.wait_for(task, timeout=300)
-                harness.sessions.update_session(thread_id, status="active")
-                await harness._runtime.persist_session_to_memory(thread_id)
+                active_harness.sessions.update_session(thread_id, status="active")
+                await active_harness._runtime.persist_session_to_memory(thread_id)
 
                 # Extract final AI text if stream didn't capture it
                 if not output_text:
@@ -494,12 +502,12 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
                     if not output_text:
                         output_text = result.get("output") or result.get("response") or "Task completed."
 
-                harness.sessions.save_message(thread_id, sender="agent", text=output_text)
+                active_harness.sessions.save_message(thread_id, sender="agent", text=output_text)
                 done_ev = _json.dumps({"type": "done", "output": output_text, "status": "complete"})
                 yield f"data: {done_ev}\n\n"
 
             except asyncio.CancelledError:
-                harness.sessions.save_message(thread_id, sender="agent", text="🛑 Execution stopped by user.")
+                active_harness.sessions.save_message(thread_id, sender="agent", text="🛑 Execution stopped by user.")
                 done_ev = _json.dumps({"type": "done", "output": "🛑 Execution stopped by user.", "status": "stopped"})
                 yield f"data: {done_ev}\n\n"
 
@@ -536,8 +544,9 @@ async def get_run_status(thread_id: str) -> dict[str, Any]:
     if harness is None:
         raise HTTPException(status_code=500, detail="Harness not initialized.")
 
-    state = await harness.get_state(thread_id) or {}
-    messages = harness.sessions.get_messages(thread_id)
+    active_harness = harness
+    state = await active_harness.get_state(thread_id) or {}
+    messages = active_harness.sessions.get_messages(thread_id)
     if "messages" not in state or not state["messages"]:
         state["messages"] = messages
     return state
@@ -549,7 +558,8 @@ async def resume_run(thread_id: str, req: ResumeRequest) -> dict[str, Any]:
     if harness is None:
         raise HTTPException(status_code=500, detail="Harness not initialized.")
 
-    result = await harness.resume(thread_id, approved=req.approved)
+    active_harness = harness
+    result = await active_harness.resume(thread_id, approved=req.approved)
     return {"thread_id": thread_id, **result}
 
 
@@ -559,8 +569,9 @@ async def stream_run(thread_id: str) -> StreamingResponse:
     if harness is None:
         raise HTTPException(status_code=500, detail="Harness not initialized.")
 
+    active_harness = harness
     async def event_generator():
-        async for chunk in harness.stream(thread_id):
+        async for chunk in active_harness.stream(thread_id):
             yield f"data: {str(chunk)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")

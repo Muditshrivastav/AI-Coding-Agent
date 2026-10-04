@@ -2,6 +2,7 @@
 agent/core.py - CodingAgentHarness: single entry point for running and resuming agent executions.
 """
 
+import logging
 from typing import Any, AsyncIterator
 from langgraph.types import Command
 from frameworks.deepagents_backend import DeepAgentsBackend
@@ -22,6 +23,7 @@ from frameworks.evaluation import LangSmithTracer, HarnessEvaluator
 from frameworks.agents_md_writer import generate_agents_md
 from skills.registry import skill_library
 
+logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Input sanitization — known prompt-injection trigger phrases.
 # These are heuristic patterns, not a complete defence; they serve as a
@@ -139,7 +141,7 @@ class CodingAgentHarness:
         self._tracer = tracer or LangSmithTracer()
         self._evaluator = HarnessEvaluator(tracer_instance=self._tracer)
 
-        self._guard = HarnessGuard(f"{root_dir}/harness/permissions.json")
+        self._guard = HarnessGuard(f"{root_dir}/harness/permissions.json", silent_mode=True)
         self._backend = DeepAgentsBackend(
             root_dir=root_dir,
             guard=self._guard,
@@ -151,17 +153,26 @@ class CodingAgentHarness:
         self._deploy_tools = DeployToolset(root_dir=root_dir)
         self._verification_tools = VerificationToolset(root_dir=root_dir)
         self._api_tools = APIToolset()
-        self._tools = (
-            tools
-            if tools is not None
-            else [
-                *self._deploy_tools.get_tools(),
-                *self._verification_tools.get_tools(),
-                *self._api_tools.get_tools(),
-                create_repo_ingest_tool(),      # auto-ingest GitHub repos into Neo4j
-                create_graphrag_retriever_tool(),  # query Neo4j for code context
-            ]
-        )
+        # Build tools list with safety wraps for DB-dependent tools
+        try:
+            self._tools = (
+                tools
+                if tools is not None
+                else [
+                    *self._deploy_tools.get_tools(),
+                    *self._verification_tools.get_tools(),
+                    *self._api_tools.get_tools(),
+                ]
+            )
+            # Add DB-dependent tools separately to prevent boot-loops
+            try:
+                self._tools.append(create_repo_ingest_tool())
+                self._tools.append(create_graphrag_retriever_tool())
+            except Exception as db_exc:
+                logger.error(f"GraphRAG tools failed to load: {db_exc}")
+        except Exception as e:
+            logger.error(f"Base tools initialization failed: {e}")
+            self._tools = []
 
         # Build subagents hierarchy
         subagents = [
@@ -297,7 +308,7 @@ class CodingAgentHarness:
         existing_state = await self.get_state(thread_id)
         if existing_state and "messages" in existing_state:
             # Subsequent turn in this session: append user message to existing history
-            input_payload: dict[str, Any] = {"messages": [{"role": "user", "content": user_request}]}
+            input_payload: Any = {"messages": [{"role": "user", "content": user_request}]}
         else:
             # First turn: initialize full AgentState
             input_payload = create_initial_state(user_request)

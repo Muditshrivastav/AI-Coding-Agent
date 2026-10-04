@@ -9,6 +9,9 @@ vector matches and surface only genuinely relevant code.
 from abc import ABC, abstractmethod
 from typing import Any
 import math
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 class BaseReranker(ABC):

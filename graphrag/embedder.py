@@ -6,10 +6,13 @@ HuggingFace / Ollama / local sentence-transformers models, and an offline hash-b
 """
 
 from abc import ABC, abstractmethod
-from typing import Sequence
+from typing import Sequence, Any, Union
 import hashlib
 import math
+from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
 
 class BaseEmbedder(ABC):
     """Abstract base class for vector embedders."""
@@ -45,18 +48,18 @@ class DefaultEmbedder(BaseEmbedder):
     ) -> None:
         self._model_name = model_name
         self._dim = dimension
-        self._hf_embeddings = None
+        self._ollama_embeddings: Union["OllamaEmbeddings", "SentenceTransformer", None] = None
 
         # Attempt to load langchain-ollama OllamaEmbeddings
         try:
             from langchain_ollama import OllamaEmbeddings
 
             # Strip any accidental whitespace from model name before passing to Ollama
-            self._hf_embeddings = OllamaEmbeddings(
+            self._ollama_embeddings = OllamaEmbeddings(
                 model=model_name.strip(),
             )
             # Detect dimension if possible
-            sample_vec = self._hf_embeddings.embed_query("test")
+            sample_vec = self._ollama_embeddings.embed_query("test")
             self._dim = len(sample_vec)
         except Exception:
             # Fallback to sentence_transformers — ONLY for HuggingFace-style model names.
@@ -68,40 +71,45 @@ class DefaultEmbedder(BaseEmbedder):
                     from sentence_transformers import SentenceTransformer
 
                     st_model = SentenceTransformer(model_name.strip(), trust_remote_code=True)
-                    self._dim = st_model.get_sentence_embedding_dimension()
-                    self._hf_embeddings = st_model
+                    self._dim = st_model.get_embedding_dimension()
+                    self._ollama_embeddings = st_model
                 except Exception:
-                    self._hf_embeddings = None
+                    self._ollama_embeddings = None
             else:
-                self._hf_embeddings = None
+                
+                self.ollama_embeddings = None
 
     @property
     def dimension(self) -> int:
-        return self._dim
+        return self._dim if self._dim is not None else 4096
 
     def embed_text(self, text: str) -> list[float]:
-        if self._hf_embeddings is not None:
+        if self._ollama_embeddings is not None:
             try:
-                if hasattr(self._hf_embeddings, "embed_query"):
-                    return [float(x) for x in self._hf_embeddings.embed_query(text)]
-                elif hasattr(self._hf_embeddings, "encode"):
-                    emb = self._hf_embeddings.encode(text, convert_to_numpy=True)
+                # Cast to Any to avoid Pylance confusion between Ollama and SentenceTransformer APIs
+                model: Any = self._ollama_embeddings
+                if hasattr(model, "embed_query"):
+                    return [float(x) for x in model.embed_query(text)]
+                elif hasattr(model, "encode"):
+                    emb = model.encode(text, convert_to_numpy=True)
                     return emb.tolist()
             except Exception:
                 pass
-        return self._deterministic_hash_vector(text, self._dim)
+        return self._deterministic_hash_vector(text, self._dim or 4096)
 
     def embed_batch(self, texts: Sequence[str]) -> list[list[float]]:
-        if self._hf_embeddings is not None:
+        if self._ollama_embeddings is not None:
             try:
-                if hasattr(self._hf_embeddings, "embed_documents"):
-                    return [[float(x) for x in doc] for doc in self._hf_embeddings.embed_documents(list(texts))]
-                elif hasattr(self._hf_embeddings, "encode"):
-                    embs = self._hf_embeddings.encode(list(texts), convert_to_numpy=True)
+                # Cast to Any to avoid Pylance confusion between Ollama and SentenceTransformer APIs
+                model: Any = self._ollama_embeddings
+                if hasattr(model, "embed_documents"):
+                    return [[float(x) for x in doc] for doc in model.embed_documents(list(texts))]
+                elif hasattr(model, "encode"):
+                    embs = model.encode(list(texts), convert_to_numpy=True)
                     return embs.tolist()
             except Exception:
                 pass
-        return [self._deterministic_hash_vector(t, self._dim) for t in texts]
+        return [self._deterministic_hash_vector(t, self._dim or 4096) for t in texts]
 
     @staticmethod
     def _deterministic_hash_vector(text: str, dim: int) -> list[float]:

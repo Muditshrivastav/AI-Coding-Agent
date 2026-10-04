@@ -58,7 +58,8 @@ def create_typesafe_decision_tool() -> StructuredTool | None:
 
     def run_decision(state: str, decision_type: str = "triage") -> str:
         try:
-            classifier = TypeSafeClassifier()
+            # Cast to Any because TypeSafeClassifier is a conditionally imported type
+            classifier: Any = TypeSafeClassifier()
             if decision_type == "strategy":
                 questions = {
                     "can_auto_fix": Noul(instructions="Can this issue likely be auto-fixed by code edits or re-running tests?"),
@@ -126,7 +127,10 @@ def create_typesafe_decision_tool() -> StructuredTool | None:
 
 
 class ShellCommandArgs(BaseModel):
-    command: str = Field(description="The shell command string to execute (e.g. 'git status', 'git add .', 'git commit -m ...').")
+    command: str = Field(
+        alias="cmd", 
+        description="The shell command string to execute (e.g. 'git status', 'git add .', 'git commit -m ...')."
+    )
 
 def create_shell_tool(
     backend: LocalShellBackend,
@@ -333,7 +337,7 @@ def build_dev_subagent(
     external_tools: ExternalToolsManager | None = None,
     mcp_clients: list[MCPClientWrapper] | None = None,
     root_dir: str = ".",
-    backend: LocalShellBackend | None = None,
+    backend: Any | None = None,
     guard: HarnessGuard | None = None,
 ) -> dict[str, Any]:
     """Constructs the build subagent specification with assigned tools,
