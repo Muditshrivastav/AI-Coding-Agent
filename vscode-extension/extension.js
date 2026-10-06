@@ -232,7 +232,6 @@ class CodingAgentViewProvider {
     // (handles the case where the dist/ folder was updated while VS Code ran)
     webviewView.onDidChangeVisibility(() => {
       if (webviewView.visible) {
-        ensureApiRunning(repoRoot, /* silent */ true);
         const n2 = nonce();
         webviewView.webview.html = buildHtml(webviewView.webview, distDir, n2);
       }
@@ -475,11 +474,24 @@ function startApiInTerminal(repoRoot, forceRestart = false, silent = false) {
   });
   terminal.show(false);
 
-  // Switch to repo directory, set env vars, then start uvicorn
+  // Switch to repo directory, set env vars, then start uvicorn in a restart loop.
+  // --reload is intentionally omitted: harness/ file writes (AGENTS.md, sessions/)
+  // trigger uvicorn restart loops. Instead we use a plain while-loop so the terminal
+  // stays alive and uvicorn restarts automatically on crash — without --reload.
   terminal.sendText(`cd "${repoRoot}"`, true);
   terminal.sendText(`$env:AGENT_ROOT_DIR="${targetWorkspace}"`, true);
   terminal.sendText(`$env:VSCODE_CWD=""`, true);
-  const cmd = `& "${python}" -m uvicorn interfaces.api_server:app --host 127.0.0.1 --port 8000 --reload`;
+  // PowerShell restart loop — keeps uvicorn running indefinitely without --reload.
+  // Press Ctrl+C twice (once to stop uvicorn, once to break the loop) to exit manually.
+  const cmd = [
+    `while ($true) {`,
+    `  Write-Host "[Coding Agent] Starting uvicorn (no --reload)..." -ForegroundColor Cyan`,
+    `  & "${python}" -m uvicorn interfaces.api_server:app --host 127.0.0.1 --port 8000`,
+    `  $exit = $LASTEXITCODE`,
+    `  Write-Host "[Coding Agent] uvicorn exited (code $exit). Restarting in 2 s..." -ForegroundColor Yellow`,
+    `  Start-Sleep -Seconds 2`,
+    `}`,
+  ].join('; ');
   terminal.sendText(cmd, true);
 
   // Track last known workspace
@@ -586,13 +598,16 @@ function startWorkspacePoller(repoRoot) {
       _pollerRestarting = true;
 
       try {
-        // Dispose any stale terminal
+        // The 'Coding Agent API' terminal runs uvicorn inside a while-loop.
+        // If the terminal is still alive, uvicorn is just mid-restart (2 s pause).
+        // Do NOT dispose the terminal — let the loop bring it back on its own.
         const existing = vscode.window.terminals.find(t => t.name === 'Coding Agent API');
         if (existing) {
-          existing.dispose();
-          await new Promise(r => setTimeout(r, 600));
+          console.log('[AI Coding Agent] Poller: API is down but terminal loop is alive — waiting for auto-restart...');
+          return;
         }
-        console.log('[AI Coding Agent] Poller: API is down (grace period expired). Restarting...');
+        // Terminal is gone — spawn a fresh one with the restart loop.
+        console.log('[AI Coding Agent] Poller: API terminal gone (grace period expired). Spawning new terminal...');
         startApiInTerminal(repoRoot, false, /* silent */ true);
       } finally {
         _pollerRestarting = false;
@@ -620,8 +635,16 @@ function activate(ctx) {
   // ── Initialise last-known workspace tracking ──────────────────────────────
   _lastKnownWorkspace = getTargetWorkspace() || repoRoot;
 
-  // ── Auto-start API quietly whenever the extension activates ──────────────
-  ensureApiRunning(repoRoot, /* silent */ true);
+  // ── Auto-start DISABLED ────────────────────────────────────────────────────
+  // The extension no longer spawns the API terminal automatically on activation,
+  // on sidebar open, or via the background health-check poller.
+  //
+  // To start the API server use ONE of:
+  //   • PM2 (recommended, stays alive across terminal sessions):
+  //       pm2 start ecosystem.config.js
+  //       .\start-api.ps1
+  //   • Manual one-off (dies when terminal closes):
+  //       Ctrl+Shift+P → "AI Coding Agent: Start API"
 
   // ── Register the WebviewViewProvider ────────────────────────────────────
   const provider = new CodingAgentViewProvider(ctx);
@@ -633,7 +656,7 @@ function activate(ctx) {
     }),
   );
 
-  // ── Command: start the FastAPI server ────────────────────────────────────
+  // ── Command: start the FastAPI server (manual, on-demand only) ───────────
   ctx.subscriptions.push(
     vscode.commands.registerCommand('codingAgent.startApi', () => {
       startApiInTerminal(repoRoot, /* forceRestart */ true);
@@ -644,16 +667,14 @@ function activate(ctx) {
   ctx.subscriptions.push(
     vscode.commands.registerCommand('codingAgent.openUi', () => {
       provider.focus();
-      // Ensure API is running when opening UI
-      ensureApiRunning(repoRoot, /* silent */ true);
       // VS Code built-in command to open and focus the view container
       vscode.commands.executeCommand(`${VIEW_ID}.focus`);
     }),
   );
 
-  // ── Watch for VS Code workspace folder changes ───────────────────────────
-  // Fires when folders are added/removed via the VS Code workspace API.
-  // The poller below also catches changes that don't trigger this event.
+  // ── Workspace folder change handler ─────────────────────────────────────
+  // When the workspace changes, update the API workspace (only if it's already
+  // running — no auto-restart).
   ctx.subscriptions.push(
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       const newWorkspace = getTargetWorkspace();
@@ -666,9 +687,8 @@ function activate(ctx) {
       isApiAlive().then(alive => {
         if (alive) {
           notifyServerOfWorkspace(newWorkspace, /* immediate */ true);
-        } else {
-          startApiInTerminal(repoRoot, /* forceRestart */ true, /* silent */ true);
         }
+        // If server is not alive, do nothing — user will start it via PM2 or command.
       });
     }),
   );

@@ -20,3 +20,11 @@ tests/_tmp/
 pytest_tmp/
 pytest_temp/
 .pytest_cache/
+
+# PM2 runtime logs
+logs/
+
+# Harness runtime data written by the API on every request
+# (AGENTS.md is auto-generated; sessions/ holds per-session state)
+harness/AGENTS.md
+harness/sessions/
