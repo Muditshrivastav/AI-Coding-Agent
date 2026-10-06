@@ -1328,7 +1328,7 @@ html, body {
 
 /* Very narrow panel (< 360px) */
 @media (max-width: 360px) {
-  /* Hide model selector entirely — save space for send button */
+  /* Hide model selector entirely — save space for attach + send buttons */
   .dock-model-selector {
     display: none;
   }
@@ -1336,10 +1336,7 @@ html, body {
   .workspace-badge {
     display: none;
   }
-
-  .attach-btn {
-    display: none;
-  }
+  /* attach-btn (.+. icon) is always kept visible */
 }
 
 /* ── Groq Rate-Limit Banner ──────────────────────────────────────────────── */
