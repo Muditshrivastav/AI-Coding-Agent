@@ -99,8 +99,10 @@ def _ingest_github_repo(repo_url: str, branch: str = "main") -> str:
                 f"Repository '{project_id}' was ingested but no parseable code chunks "
                 "were found. Check that the repo is non-empty and GITHUB_TOKEN is valid."
             )
+        # B7: surface the store mode so silent fallbacks are immediately visible.
+        store_mode = "Neo4j" if pipeline.store.is_connected() else "in-memory (NOT persisted)"
         return (
-            f"Successfully ingested '{project_id}' (branch: '{branch}') into Neo4j. "
+            f"Successfully ingested '{project_id}' (branch: '{branch}') into {store_mode}. "
             f"{count} code chunks stored. You can now query this repo with "
             f"retrieve_graphrag_code(project_id='{project_id}')."
         )

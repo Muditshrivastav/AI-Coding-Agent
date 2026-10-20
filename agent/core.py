@@ -164,10 +164,14 @@ class CodingAgentHarness:
                     *self._api_tools.get_tools(),
                 ]
             )
-            # Add DB-dependent tools separately to prevent boot-loops
+            # B7: build a single shared GraphRAGPipeline so ingest and retrieval use the same
+            # store (critical for in-memory fallback mode where they previously shared nothing)
+            # and so we only pay the cost of one reranker + embedder load.
             try:
-                self._tools.append(create_repo_ingest_tool())
-                self._tools.append(create_graphrag_retriever_tool())
+                from graphrag.pipeline import GraphRAGPipeline
+                shared_pipeline = GraphRAGPipeline()
+                self._tools.append(create_repo_ingest_tool(pipeline=shared_pipeline))
+                self._tools.append(create_graphrag_retriever_tool(pipeline=shared_pipeline))
             except Exception as db_exc:
                 logger.error(f"GraphRAG tools failed to load: {db_exc}")
         except Exception as e:
