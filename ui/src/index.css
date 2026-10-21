@@ -1264,6 +1264,28 @@ html, body {
   font-style: italic;
 }
 
+/* Inline dot-pulse shown when tool events exist but agent hasn't emitted text yet */
+.agent-working-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 2px;
+}
+
+.agent-working-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent, #7c6eff);
+  opacity: 0.5;
+  animation: thinkingBounce 1.2s ease-in-out infinite;
+}
+
+.agent-working-dot:nth-child(2) { animation-delay: 0.2s; }
+.agent-working-dot:nth-child(3) { animation-delay: 0.4s; }
+
+
 /* ── Custom Scrollbar ── */
 ::-webkit-scrollbar {
   width: 5px;

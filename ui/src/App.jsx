@@ -1213,6 +1213,9 @@ export default function App() {
             {messages.map(msg => {
               const parts = msg.sender === 'agent' ? parseMessageParts(msg.text) : null
               const hasToolParts = parts && parts.some(p => p.type === 'tool')
+              const hasToolEvents = (msg.toolEvents || []).length > 0
+              // Skip empty completed agent messages (model returned no text and no tool events)
+              if (msg.sender === 'agent' && !msg.streaming && !msg.text && !hasToolEvents) return null
 
               return (
                 <div key={msg.id} className={`message-item ${msg.sender === 'user' ? 'from-user' : 'from-agent'}`}>
@@ -1254,18 +1257,20 @@ export default function App() {
                         {(msg.toolEvents || []).map((evt, ei) => (
                           <ToolActivityCard key={`${evt.id || ei}-${evt.type}`} event={evt} />
                         ))}
-                        {/* Streaming thinking indicator */}
-                        {msg.streaming && (msg.toolEvents || []).length === 0 && (
+                        {/* Thinking indicator: no tool events yet, still streaming */}
+                        {msg.streaming && !hasToolEvents && (
                           <AgentThinkingCard />
+                        )}
+                        {/* Working indicator: has tool events, still streaming, no text yet */}
+                        {msg.streaming && hasToolEvents && !msg.text && (
+                          <div className="agent-working-indicator">
+                            <span className="agent-working-dot" />
+                            <span className="agent-working-dot" />
+                            <span className="agent-working-dot" />
+                          </div>
                         )}
                         {/* Final prose response */}
                         {msg.text && (
-                          <div className="message-bubble">
-                            <FormattedContent content={msg.text} />
-                          </div>
-                        )}
-                        {/* Fallback: old-style [TOOL:] text parsing */}
-                        {!msg.toolEvents && !msg.streaming && !msg.text && (
                           <div className="message-bubble">
                             <FormattedContent content={msg.text} />
                           </div>
