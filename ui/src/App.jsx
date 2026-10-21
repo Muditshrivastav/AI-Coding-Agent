@@ -816,12 +816,25 @@ export default function App() {
           } else if (evt.type === 'rate_limit') {
             // Groq 429 — show the rate-limit banner so the user can switch to Ollama
             setRateLimitBanner({ message: evt.message, fallbacks: evt.fallbacks || [] })
+          } else if (evt.type === 'interrupt') {
+            // HITL gate: LangGraph interrupted execution — show the approval card
+            setIsRunning(false)
+            setMessages(prev => prev.map(m => m.id === agentMsgId
+              ? { ...m, streaming: false }
+              : m
+            ))
+            setPendingApproval({
+              threadId: activeSessionId,
+              description: evt.description || 'Action triggered an "ask" rule in permissions.json',
+              action: evt.action || 'Shell / File modification',
+            })
           } else if (evt.type === 'done') {
             setIsRunning(false)
             setMessages(prev => prev.map(m => m.id === agentMsgId
               ? { ...m, text: evt.output || m.text || 'Task completed.', streaming: false }
               : m
             ))
+            // Fallback: older backends may signal interrupt via status field on done event
             if (evt.status === 'interrupted' || evt.ask_approval) {
               setPendingApproval({
                 threadId: activeSessionId,

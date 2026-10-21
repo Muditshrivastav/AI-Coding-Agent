@@ -474,10 +474,31 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
                                         ev = _json.dumps({"type": "text_delta", "text": content})
                                         yield f"data: {ev}\n\n"
                 except Exception as se:
-                    logger.warning(f"Stream events error: {se}")
-                    if _is_groq_rate_limit(se):
+                    # ── HITL interrupt: LangGraph pauses the graph and raises GraphInterrupt ──
+                    # Detect it by class name so we don't need a hard import of langgraph internals.
+                    se_type = type(se).__name__
+                    if se_type in ("GraphInterrupt", "NodeInterrupt"):
+                        # Extract the interrupt payload emitted by guard.enforce() / interrupt()
+                        interrupts = getattr(se, "interrupts", None) or []
+                        payload: dict = {}
+                        if interrupts:
+                            first = interrupts[0]
+                            raw = getattr(first, "value", first) if not isinstance(first, dict) else first
+                            if isinstance(raw, dict):
+                                payload = raw
+                        interrupt_ev = _json.dumps({
+                            "type": "interrupt",
+                            "description": payload.get("description") or payload.get("signature", "Action requires approval"),
+                            "action": payload.get("signature", "Shell / File modification"),
+                            "payload": payload,
+                        })
+                        yield f"data: {interrupt_ev}\n\n"
+                        logger.info(f"🛡️ HITL interrupt raised for thread {thread_id}: {payload}")
+                    elif _is_groq_rate_limit(se):
                         rl_ev = _json.dumps(_make_rate_limit_event(chosen_model))
                         yield f"data: {rl_ev}\n\n"
+                    else:
+                        logger.warning(f"Stream events error: {se}")
 
             async for ev in stream_events():
                 yield ev
@@ -510,6 +531,28 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
                 active_harness.sessions.save_message(thread_id, sender="agent", text="🛑 Execution stopped by user.")
                 done_ev = _json.dumps({"type": "done", "output": "🛑 Execution stopped by user.", "status": "stopped"})
                 yield f"data: {done_ev}\n\n"
+
+            except Exception as ainvoke_exc:
+                # Handle GraphInterrupt raised from ainvoke (when not caught by astream)
+                exc_type = type(ainvoke_exc).__name__
+                if exc_type in ("GraphInterrupt", "NodeInterrupt"):
+                    interrupts = getattr(ainvoke_exc, "interrupts", None) or []
+                    payload: dict = {}
+                    if interrupts:
+                        first = interrupts[0]
+                        raw = getattr(first, "value", first) if not isinstance(first, dict) else first
+                        if isinstance(raw, dict):
+                            payload = raw
+                    interrupt_ev = _json.dumps({
+                        "type": "interrupt",
+                        "description": payload.get("description") or payload.get("signature", "Action requires approval"),
+                        "action": payload.get("signature", "Shell / File modification"),
+                        "payload": payload,
+                    })
+                    yield f"data: {interrupt_ev}\n\n"
+                    logger.info(f"🛡️ HITL interrupt (ainvoke) for thread {thread_id}: {payload}")
+                else:
+                    raise
 
         except Exception as exc:
             import traceback
