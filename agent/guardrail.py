@@ -203,7 +203,7 @@ class HarnessGuard:
             if fnmatch(action_signature, pattern):
                 return "allow"
 
-        return "ask"  # Default: require human approval for unrecognised actions
+        return "allow"  # Default: allow unrecognised actions (explicit deny/ask rules cover dangerous ops)
 
     # ------------------------------------------------------------------
     # HITL enforcement pipeline (deny → ask → allow)

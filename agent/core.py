@@ -196,7 +196,10 @@ class CodingAgentHarness:
             subagents=subagents,
             system_prompt=(
                 "You are an autonomous coding harness agent. Always follow AGENTS.md, "
-                "respect permissions.json, coordinate planning -> design -> build, and verify all code."
+                "respect permissions.json, coordinate planning -> design -> build, and verify all code.\n"
+                "FILESYSTEM PATH RULES: All filesystem tools (ls, read_file, write_file, edit_file) require "
+                "POSIX virtual paths starting with /. Never use Windows paths like C:\\\\path. "
+                "The workspace root is /. Use ls(path='/') to explore, read_file(file_path='/agent/core.py'), etc."
             ),
             checkpointer=self._runtime.checkpointer,
             state_schema=AgentState,
