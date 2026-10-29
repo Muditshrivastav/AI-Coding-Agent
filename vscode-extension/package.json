@@ -2,7 +2,7 @@
   "name": "coding-agent",
   "displayName": "AI Coding Agent",
   "description": "Embedded AI Coding Agent with HITL guardrail — runs the local FastAPI backend and renders the React UI inside a VS Code sidebar panel.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "Muditshrivastav",
   "engines": {
     "vscode": "^1.90.0"

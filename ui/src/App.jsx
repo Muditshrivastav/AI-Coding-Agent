@@ -404,6 +404,7 @@ export default function App() {
   const [isRunning, setIsRunning] = useState(false)
   const [pendingApproval, setPendingApproval] = useState(null)
   const [attachments, setAttachments] = useState([])
+  const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false)
   const [selectedModel, setSelectedModel] = useState('groq:qwen/qwen3.8-27b')
   const [isOnline, setIsOnline] = useState(false)
   const [activeDrawer, setActiveDrawer] = useState(null) // null | 'sessions' | 'workspace'
@@ -671,6 +672,64 @@ export default function App() {
     setAttachments(prev => prev.filter(a => a.id !== id))
   }
 
+  const toggleWorkspaceFile = (file) => {
+    setAttachments(prev => {
+      const exists = prev.some(att => att.type === 'workspace_file' && att.path === `/${file.path}`)
+      if (exists) {
+        return prev.filter(att => !(att.type === 'workspace_file' && att.path === `/${file.path}`))
+      }
+      return [...prev, {
+        id: `workspace:/${file.path}`,
+        name: file.name,
+        path: `/${file.path}`,
+        type: 'workspace_file',
+      }]
+    })
+  }
+
+  const renderWorkspacePickerTree = (items, depth = 0) => items.map(file => {
+    const isExpanded = !!expandedFolders[file.path]
+    const isSelected = attachments.some(
+      att => att.type === 'workspace_file' && att.path === `/${file.path}`
+    )
+
+    return (
+      <div key={file.path}>
+        <div className="workspace-picker-row" style={{ paddingLeft: `${8 + depth * 14}px` }}>
+          {file.is_dir ? (
+            <button
+              type="button"
+              className="workspace-picker-expand"
+              onClick={() => toggleFolder(file)}
+              aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${file.name}`}
+            >
+              {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            </button>
+          ) : (
+            <input
+              type="checkbox"
+              checked={isSelected}
+              onChange={() => toggleWorkspaceFile(file)}
+              aria-label={`Attach ${file.path}`}
+            />
+          )}
+          {file.is_dir
+            ? <Folder size={13} className="workspace-picker-folder-icon" />
+            : <FileCode size={13} className="workspace-picker-file-icon" />}
+          <button
+            type="button"
+            className="workspace-picker-name"
+            onClick={() => file.is_dir ? toggleFolder(file) : toggleWorkspaceFile(file)}
+            title={file.path}
+          >
+            {file.name}
+          </button>
+        </div>
+        {file.is_dir && isExpanded && renderWorkspacePickerTree(folderContents[file.path] || [], depth + 1)}
+      </div>
+    )
+  })
+
   const runAbortControllerRef = useRef(null)
 
   const handleStopRun = async () => {
@@ -710,9 +769,12 @@ export default function App() {
     const currentAttachments = [...attachments]
     setPrompt('')
     setAttachments([])
+    setWorkspacePickerOpen(false)
 
     let finalPrompt = rawPrompt.trim()
+    const workspaceFiles = currentAttachments.filter(att => att.type === 'workspace_file')
     const fileSnippets = currentAttachments.map(att => {
+      if (att.type === 'workspace_file') return ''
       if (att.type === 'file' && att.content) {
         return `\n\n--- Attachment: ${att.name} ---\n\`\`\`\n${att.content.slice(0, 10000)}\n\`\`\``
       } else if (att.type === 'image') {
@@ -721,6 +783,10 @@ export default function App() {
       return `\n\n[Attached file: ${att.name}]`
     }).join('')
 
+    if (workspaceFiles.length > 0) {
+      const fileList = workspaceFiles.map(att => `- ${att.path}`).join('\n')
+      finalPrompt = `${finalPrompt || 'Please review the selected workspace files.'}\n\nSelected workspace files:\n${fileList}\nRead these files using workspace filesystem tools. If my request asks for changes, edit the selected files directly instead of only suggesting code.`
+    }
     if (fileSnippets) {
       finalPrompt = `${finalPrompt || 'Please review the attached file(s):'}${fileSnippets}`
     }
@@ -1238,10 +1304,14 @@ export default function App() {
                               <div key={att.id} className="message-att-item">
                                 {att.type === 'image' ? (
                                   <img src={att.dataUrl} alt={att.name} className="message-att-thumb" />
+                                ) : att.type === 'workspace_file' ? (
+                                  <FileCode size={12} />
                                 ) : (
                                   <File size={12} />
                                 )}
-                                <span className="message-att-name">{att.name}</span>
+                                <span className="message-att-name">
+                                  {att.type === 'workspace_file' ? att.path : att.name}
+                                </span>
                               </div>
                             ))}
                           </div>
@@ -1317,16 +1387,48 @@ export default function App() {
         {/* ── Fixed Bottom Prompt Dock (Antigravity & Codex style) ── */}
         <div className="input-dock">
           <form className="input-box" onSubmit={(e) => { e.preventDefault(); handleSendMessage(); }}>
+            {workspacePickerOpen && (
+              <div className="workspace-picker-popover">
+                <div className="workspace-picker-header">
+                  <div>
+                    <strong>Add context</strong>
+                    <span>Select workspace files to include in your prompt</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="attachment-remove-btn"
+                    onClick={() => setWorkspacePickerOpen(false)}
+                    aria-label="Close workspace file picker"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+                <div className="workspace-picker-tree">
+                  {files.length > 0
+                    ? renderWorkspacePickerTree(files)
+                    : <div className="workspace-picker-empty">No workspace files found.</div>}
+                </div>
+                <div className="workspace-picker-footer">
+                  <span>{attachments.filter(att => att.type === 'workspace_file').length} files selected</span>
+                  <button type="button" onClick={() => setWorkspacePickerOpen(false)}>Done</button>
+                </div>
+              </div>
+            )}
+
             {attachments.length > 0 && (
               <div className="attachments-tray">
                 {attachments.map(att => (
-                  <div key={att.id} className="attachment-chip">
+                  <div key={att.id} className="attachment-chip" title={att.path || att.name}>
                     {att.type === 'image' ? (
                       <img src={att.dataUrl} alt={att.name} className="attachment-chip-thumb" />
+                    ) : att.type === 'workspace_file' ? (
+                      <FileCode size={12} />
                     ) : (
                       <File size={12} />
                     )}
-                    <span className="attachment-chip-name">{att.name}</span>
+                    <span className="attachment-chip-name">
+                      {att.type === 'workspace_file' ? att.path : att.name}
+                    </span>
                     <button
                       type="button"
                       className="attachment-remove-btn"
@@ -1364,6 +1466,16 @@ export default function App() {
 
             <div className="input-controls">
               <div className="input-controls-left">
+                <button
+                  type="button"
+                  className="attach-btn"
+                  onClick={() => setWorkspacePickerOpen(prev => !prev)}
+                  title="Add workspace files"
+                  aria-label="Browse workspace files"
+                  aria-expanded={workspacePickerOpen}
+                >
+                  <FolderSearch size={15} />
+                </button>
                 <button
                   type="button"
                   className="attach-btn"

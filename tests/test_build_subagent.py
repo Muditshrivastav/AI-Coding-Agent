@@ -33,6 +33,34 @@ def test_build_dev_subagent_spec():
     assert spec["external_tools"] is ext_mgr
 
 
+def test_probabilistic_decision_uses_ollama_nimble(monkeypatch):
+    from langchain_core.messages import AIMessage
+    from nodes.build_subagent import create_probabilistic_decision_tool
+
+    calls = {}
+
+    class FakeDecisionModel:
+        def invoke(self, prompt):
+            calls["prompt"] = prompt
+            return AIMessage(content="Recommended action: investigate.")
+
+    def create_model(**kwargs):
+        calls["model_kwargs"] = kwargs
+        return FakeDecisionModel()
+
+    monkeypatch.setattr("nodes.build_subagent.ChatOllama", create_model)
+    tool = create_probabilistic_decision_tool()
+
+    result = tool.invoke(
+        {"state": "Deployment returned HTTP 500.", "decision_type": "strategy"}
+    )
+
+    assert calls["model_kwargs"]["model"] == "nimble:latest"
+    assert "investigate, retry, rollback, or escalate" in calls["prompt"]
+    assert "Deployment returned HTTP 500." in calls["prompt"]
+    assert "Recommended action: investigate." in result
+
+
 def test_get_build_dev_tools():
     import asyncio
 
@@ -76,9 +104,9 @@ def test_execute_command_hitl_guardrail():
     tool = create_shell_tool(backend=mock_backend, guard=guard)
 
     # 1. Test allowed command
-    res_allow = tool.func("git status")
+    res_allow = tool.func("git status", timeout_seconds=1200)
     assert "succeeded" in res_allow
-    mock_backend.execute.assert_called_with("git status")
+    mock_backend.execute.assert_called_with("git status", timeout=1200)
 
     # 2. Test denied dangerous command
     res_deny = tool.func("rm -rf /")
@@ -93,6 +121,22 @@ def test_execute_command_hitl_guardrail():
     with patch("nodes.build_subagent.interrupt", return_value={"approved": False}) as mock_interrupt:
         res_ask_rejected = tool.func("git push origin main")
         assert "HITL REJECTED" in res_ask_rejected
+
+
+def test_workspace_shell_inherits_path_and_runs_from_workspace(tmp_path):
+    from deepagents.backends import LocalShellBackend
+
+    backend = LocalShellBackend(
+        root_dir=tmp_path,
+        timeout=900,
+        inherit_env=True,
+    )
+
+    assert backend.cwd == tmp_path
+    assert backend._env.get("PATH")
+    response = backend.execute("python --version", timeout=30)
+    assert response.exit_code == 0
+    assert "Python" in response.output
 
 
 def test_real_mcp_server_integration(tmp_path):

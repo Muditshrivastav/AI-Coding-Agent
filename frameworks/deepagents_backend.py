@@ -281,7 +281,11 @@ class DeepAgentsBackend:
         self._sandbox_mode = sandbox_mode or os.environ.get("SANDBOX_MODE", "local")
 
         if self._sandbox_mode == "local":
-            raw_backend: Any = LocalShellBackend(root_dir=root_dir)
+            raw_backend: Any = LocalShellBackend(
+                root_dir=root_dir,
+                timeout=900,
+                inherit_env=True,
+            )
         else:
             # "auto" or "docker"
             raw_backend = DockerSandboxBackend(
@@ -402,5 +406,4 @@ class DeepAgentsBackend:
             ])
 
         return agent
-
 

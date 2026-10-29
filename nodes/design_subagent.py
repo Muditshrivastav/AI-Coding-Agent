@@ -23,8 +23,16 @@ from frameworks.mcp_client import DrawioMCPClient, drawio_mcp_client
 DESIGN_SYSTEM_PROMPT = """You are the design-agent for an autonomous coding harness.
 Your task is to read PLAN.md from the root directory and produce ARCHITECTURE.md.
 
+WORKSPACE FILE ACCESS:
+- The workspace root is mounted at `/`. Use POSIX-style virtual paths, even on Windows.
+- Use `ls(path="/")`, `glob`, and `grep` to find individual workspace files.
+- Read a file with `read_file(file_path="/PLAN.md")` or another path under `/`.
+- When asked to change an existing file, use `edit_file` with its `/`-rooted path.
+- Use `write_file` to create a new workspace file.
+- Use `write_architecture` to write ARCHITECTURE.md; it is protected by HarnessGuard.
+
 Follow these strict requirements:
-1. Read PLAN.md via read_file before producing any output.
+1. Read `/PLAN.md` with `read_file` before producing any output, and inspect other files when useful.
 2. Outline components, inter-module communication, data flow, tech choices, and file boundaries.
 3. Structure the output into ARCHITECTURE.md so the build subagent can decompose it into concrete todos.
 4. Use the available draw.io tools to create a visual architecture diagram and export it alongside ARCHITECTURE.md.
@@ -93,18 +101,19 @@ async def make_design_subagent(
 
     primary_llm = ChatGroq(model="qwen/qwen3.8-27b", temperature=0.2)
     fallback_llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
-    llm = primary_llm.with_fallbacks([fallback_llm])
     backend = FilesystemBackend(root_dir=root_dir)
 
     drawio: DrawioMCPClient = drawio_mcp_client()
     drawio_tools = await drawio.get_tools()  # POSTs initialize, then list_tools
 
-    agent = create_deep_agent(
-        model=llm,
-        backend=backend,
-        system_prompt=DESIGN_SYSTEM_PROMPT,
-        tools=[write_arch_tool, *drawio_tools],
-    )
+    agent_kwargs = {
+        "backend": backend,
+        "system_prompt": DESIGN_SYSTEM_PROMPT,
+        "tools": [write_arch_tool, *drawio_tools],
+    }
+    primary_agent = create_deep_agent(model=primary_llm, **agent_kwargs)
+    fallback_agent = create_deep_agent(model=fallback_llm, **agent_kwargs)
+    agent = primary_agent.with_fallbacks([fallback_agent])
     return agent, drawio
 
 

@@ -32,10 +32,7 @@ from pydantic import BaseModel, Field
 from agent.guardrail import HarnessGuard
 from langgraph.types import interrupt
 
-try:
-    from langchain_typesafe import Choice, Noul, Score, TypeSafeClassifier
-except ImportError:
-    Choice = Noul = Score = TypeSafeClassifier = None  # type: ignore[assignment,misc]
+BuildMCPClient = MCPClientWrapper | RenderMCPClient
 
 
 class ProbabilisticDecisionArgs(BaseModel):
@@ -48,79 +45,36 @@ class ProbabilisticDecisionArgs(BaseModel):
     )
 
 
-def create_typesafe_decision_tool() -> StructuredTool | None:
-    """Creates a StructuredTool wrapping TypeSafeClassifier for low-token,
-
-    probabilistic structured decisions.
-    """
-    if TypeSafeClassifier is None:
-        return None
+def create_probabilistic_decision_tool() -> StructuredTool:
+    """Create a decision tool backed by the local Ollama Nimble model."""
+    decision_model = ChatOllama(model="nimble:latest", temperature=0.2)
 
     def run_decision(state: str, decision_type: str = "triage") -> str:
-        try:
-            # Cast to Any because TypeSafeClassifier is a conditionally imported type
-            classifier: Any = TypeSafeClassifier()
-            if decision_type == "strategy":
-                questions = {
-                    "can_auto_fix": Noul(instructions="Can this issue likely be auto-fixed by code edits or re-running tests?"),
-                    "action": Choice(
-                        instructions="What is the recommended recovery action?",
-                        criteria={
-                            "investigate": "Inspect code tracebacks, logs, and AST/graph context.",
-                            "retry": "Transient error; retry build, test, or deployment step.",
-                            "rollback": "Breaking change; revert last commit or rollback deployment.",
-                            "escalate": "Requires human developer or architect intervention.",
-                        },
-                    ),
-                    "confidence": Score(
-                        instructions="How confident is this decision recommendation?",
-                        criteria=["Low confidence / ambiguous.", "Moderate confidence.", "High confidence."],
-                    ),
-                }
-            else:  # Default triage
-                questions = {
-                    "urgent": Noul(instructions="Does this need immediate attention or halt the build?"),
-                    "category": Choice(
-                        instructions="Which area or pipeline step does this failure belong to?",
-                        criteria={
-                            "build": "Compilation, syntax, or packaging error.",
-                            "test": "Unit or integration test failure.",
-                            "lint": "Linting, formatting, or static typing violation.",
-                            "deploy": "Deployment, network, or environment issue.",
-                        },
-                    ),
-                    "severity": Score(
-                        instructions="How severe is the issue?",
-                        criteria=["Cosmetic or minor warning.", "Blocking single module/test.", "Full pipeline breakage."],
-                    ),
-                }
+        if decision_type == "strategy":
+            instructions = (
+                "Assess whether the issue is likely auto-fixable, recommend one action "
+                "(investigate, retry, rollback, or escalate), and state your confidence."
+            )
+        else:
+            instructions = (
+                "Assess urgency, classify the issue as build, test, lint, or deploy, "
+                "and state its severity as minor, blocking, or critical."
+            )
 
-            response = classifier.invoke({"state": state, "questions": questions})
-
-            # Format the probabilistic structured output concisely
-            results = []
-            if hasattr(response, "nouls"):
-                for k, v in response.nouls.items():
-                    results.append(f"{k}: {getattr(v, 'noul', v)}")
-            if hasattr(response, "choices"):
-                for k, v in response.choices.items():
-                    choice_val = getattr(v, "choice", v)
-                    conf_val = getattr(v, "confidence", "")
-                    results.append(f"{k}: {choice_val} (confidence: {conf_val})")
-            if hasattr(response, "scores"):
-                for k, v in response.scores.items():
-                    results.append(f"{k}: {getattr(v, 'score', v)}")
-
-            return "[TypeSafe Probabilistic Decision]\n" + "\n".join(results)
-        except Exception as exc:
-            return f"TypeSafe decision failed: {exc}"
+        response = decision_model.invoke(
+            f"{instructions}\nBe concise and base your assessment only on the context below.\n\n"
+            f"Context:\n{state}"
+        )
+        if not isinstance(response.content, str):
+            raise TypeError("Ollama Nimble returned a non-text decision response.")
+        return f"[Ollama Nimble Decision]\n{response.content}"
 
     return StructuredTool.from_function(
         func=run_decision,
         name="probabilistic_decision",
         description=(
-            "Makes low-token, probabilistic, type-safe structured decisions for triage, "
-            "error recovery, and action selection using TypeSafeClassifier."
+            "Uses the local Ollama nimble:latest model to assess build issues for triage "
+            "or recommend a recovery strategy."
         ),
         args_schema=ProbabilisticDecisionArgs,
     )
@@ -131,6 +85,12 @@ class ShellCommandArgs(BaseModel):
         alias="cmd", 
         description="The shell command string to execute (e.g. 'git status', 'git add .', 'git commit -m ...')."
     )
+    timeout_seconds: int = Field(
+        default=900,
+        ge=1,
+        le=1800,
+        description="Maximum command duration in seconds (1-1800).",
+    )
 
 def create_shell_tool(
     backend: LocalShellBackend,
@@ -140,7 +100,7 @@ def create_shell_tool(
     """Creates a StructuredTool wrapping LocalShellBackend.execute directly with a HITL guardrail layer."""
     harness_guard = guard or HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
 
-    def run_shell(command: str) -> str:
+    def run_shell(command: str, timeout_seconds: int = 900) -> str:
         cmd_stripped = command.strip()
         signature = f"Bash({cmd_stripped})"
 
@@ -156,7 +116,7 @@ def create_shell_tool(
             return str(exc)
 
         # Gate passed — execute safely via LocalShellBackend
-        res = backend.execute(cmd_stripped)
+        res = backend.execute(cmd_stripped, timeout=timeout_seconds)
         output = (res.output or "").strip()
         status = "succeeded" if res.exit_code == 0 else f"failed with exit code {res.exit_code}"
         return f"[Command {status}]\n{output}" if output else f"[Command {status}]"
@@ -164,7 +124,11 @@ def create_shell_tool(
     return StructuredTool.from_function(
         func=run_shell,
         name="execute_command",
-        description="Executes shell commands on the host within project root via LocalShellBackend. Protected by a HITL guardrail layer (blocks harmful commands, requests approval for sensitive operations).",
+        description=(
+            "Runs host shell commands from the workspace root with the user's PATH and "
+            "environment, including package installation and Git commands. Use "
+            "timeout_seconds up to 1800 for long installs/builds. Protected by HarnessGuard."
+        ),
         args_schema=ShellCommandArgs,
     )
 
@@ -180,7 +144,7 @@ FILESYSTEM PATH RULES (CRITICAL — READ FIRST):
 - Shell commands via execute_command use the host shell and DO accept normal paths/commands
 
 Tool Usage & Integration:
-- Terminal & Shell Execution: Use the `execute_command` tool (or built-in `execute`) to run git commands (following `harness/GITHUB.md`) and any host shell commands needed.
+- Terminal & Shell Execution: Use `execute_command` for host shell commands, package installs, and Git operations. It inherits the user's PATH/environment and runs from the workspace. Set `timeout_seconds` up to 1800 for long installs/builds; sensitive operations still follow HarnessGuard approval rules.
 - Filesystem Tools: Use `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep` with POSIX virtual paths (e.g., /agent/core.py, /nodes/build_subagent.py). Always start with ls(path="/") to explore the workspace.
 - Probabilistic Decisions (Low-token): Use the `probabilistic_decision` tool for triage and strategy decisions when encountering errors or needing structured probabilistic categorization without heavy reasoning token overhead.
 - Self-Verification: Call the `run_verification` tool ('all', 'lint', or 'test') to validate your changes. It runs linting and pytest tests, returning actionable stdout/stderr tracebacks. If verification fails, inspect the traceback, resolve the issue in code, and verify again.
@@ -207,10 +171,10 @@ Build Loop Rules:
 async def get_build_dev_tools(
     base_tools: list[Any] | None = None,
     external_tools_manager: ExternalToolsManager | None = None,
-    mcp_clients: list[MCPClientWrapper] | None = None,
+    mcp_clients: list[BuildMCPClient] | None = None,
     include_deploy: bool = True,
     root_dir: str = ".",
-) -> tuple[list[Any], ExternalToolsManager, list[MCPClientWrapper]]:
+) -> tuple[list[Any], ExternalToolsManager, list[BuildMCPClient]]:
     """Gathers and resolves all tools for the build subagent:
 
     1. Base / deployment tools (DeployToolset)
@@ -258,7 +222,7 @@ async def get_build_dev_tools(
             tools.append(harness_guard.wrap_tool_with_guard(ext_mgr._tavily_tool, interrupt_fn=interrupt))
 
     # 3. Dedicated MCP clients
-    clients = list(mcp_clients or [])
+    clients: list[BuildMCPClient] = list(mcp_clients or [])
     if os.getenv("RENDER_API_KEY") and not any(isinstance(c, RenderMCPClient) for c in clients):
         clients.append(render_mcp_client())
 
@@ -279,17 +243,20 @@ async def get_build_dev_tools(
         except Exception:
             pass
 
-    # 5. TypeSafe Probabilistic Decision Tool (Low-token classification & triage)
+    # 5. Ollama Nimble probabilistic decision tool.
     if not any(getattr(t, "name", "") == "probabilistic_decision" for t in tools):
-        typesafe_tool = create_typesafe_decision_tool()
-        if typesafe_tool is not None:
-            tools.append(typesafe_tool)
+        tools.append(create_probabilistic_decision_tool())
 
     # 6. LocalShellBackend Terminal & Shell Execution Tool (with HITL Guardrail Layer)
     if not any(getattr(t, "name", "") == "execute_command" for t in tools):
         # Hard failure here: if the guarded shell tool cannot be created the build
         # subagent must not run without it, as unguarded shell access would be unsafe.
-        tools.append(create_shell_tool(LocalShellBackend(root_dir=root_dir), root_dir=root_dir))
+        tools.append(
+            create_shell_tool(
+                LocalShellBackend(root_dir=root_dir, timeout=900, inherit_env=True),
+                root_dir=root_dir,
+            )
+        )
 
     return tools, ext_mgr, clients
 
@@ -301,8 +268,8 @@ async def make_build_subagent(
     temperature: float = 0.2,
     extra_tools: list[Any] | None = None,
     external_tools_manager: ExternalToolsManager | None = None,
-    mcp_clients: list[MCPClientWrapper] | None = None,
-) -> tuple[Any, ExternalToolsManager, list[MCPClientWrapper]]:
+    mcp_clients: list[BuildMCPClient] | None = None,
+) -> tuple[Any, ExternalToolsManager, list[BuildMCPClient]]:
     """Build a deep build subagent wired with LocalShellBackend, ExternalToolsManager,
 
     and MCPClientWrapper tools.
@@ -323,7 +290,7 @@ async def make_build_subagent(
     primary_llm = ChatGroq(model=model, temperature=temperature)
     fallback_llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=temperature, num_ctx=8192)
     llm = primary_llm.with_fallbacks([fallback_llm])
-    backend = LocalShellBackend(root_dir=root_dir)
+    backend = LocalShellBackend(root_dir=root_dir, timeout=900, inherit_env=True)
 
     tools, ext_mgr, active_mcp_clients = await get_build_dev_tools(
         base_tools=extra_tools,
@@ -344,7 +311,7 @@ async def make_build_subagent(
 def build_dev_subagent(
     all_tools: list[Any] | None = None,
     external_tools: ExternalToolsManager | None = None,
-    mcp_clients: list[MCPClientWrapper] | None = None,
+    mcp_clients: list[BuildMCPClient] | None = None,
     root_dir: str = ".",
     backend: Any | None = None,
     guard: HarnessGuard | None = None,
@@ -359,7 +326,11 @@ def build_dev_subagent(
 
     # Shared guard for this subagent build.
     harness_guard = guard or HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
-    shell_backend = backend or LocalShellBackend(root_dir=root_dir)
+    shell_backend = backend or LocalShellBackend(
+        root_dir=root_dir,
+        timeout=900,
+        inherit_env=True,
+    )
 
     ext_mgr = external_tools or ExternalToolsManager()
     # Immediately wire synchronous external tools (like Tavily search) — guarded.
@@ -382,11 +353,9 @@ def build_dev_subagent(
         except Exception:
             pass
 
-    # Immediately wire TypeSafe probabilistic decision tool
+    # Immediately wire the Ollama Nimble probabilistic decision tool.
     if not any(getattr(t, "name", "") == "probabilistic_decision" for t in tools):
-        typesafe_tool = create_typesafe_decision_tool()
-        if typesafe_tool is not None:
-            tools.append(typesafe_tool)
+        tools.append(create_probabilistic_decision_tool())
 
     # LocalShellBackend Terminal & Shell Execution Tool (with HITL Guardrail Layer)
     # Hard failure: the build subagent must not run without a guarded shell tool.

@@ -36,7 +36,7 @@ Alternatively, package and install the `.vsix`:
 ```bash
 cd vscode-extension
 npm install          # installs @vscode/vsce devDependency
-npx vsce package     # produces coding-agent-0.1.0.vsix
+npx vsce package     # produces coding-agent-0.1.1.vsix
 ```
 
 Then in VS Code: **Extensions → Install from VSIX…** → pick the generated file.
@@ -60,6 +60,10 @@ This opens a dedicated terminal running:
 The ✨ sidebar panel loads the built React app in a Webview pointed at
 `http://127.0.0.1:8000`.  On narrow widths (≤ 520 px) the session list
 and file explorer are automatically hidden so the chat fills the panel.
+Use the folder-search button beside the prompt to browse the workspace tree
+inside the chat panel and select one or more files. Their paths appear as
+removable prompt attachments; the agent reads and edits those workspace files
+directly when requested.
 
 ---
 

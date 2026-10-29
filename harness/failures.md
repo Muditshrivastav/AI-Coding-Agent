@@ -63,3 +63,7 @@
 | 2026-09-19T07:18:48Z | build | verification | pytest: AssertionError: expected True, got False | Inspect diagnostics and repair in next turn |
 | 2026-09-19T07:18:48Z | verify | verification | ruff check: ruff check failed | Inspect diagnostics and repair in next turn |
 | 2026-09-19T07:18:48Z | verify | verification | pytest: pytest error | Inspect diagnostics and repair in next turn |
+| 2026-10-29 08:35 UTC | guardrail | security-deny | Build agent requests: rm -rf / | Blocked by deny rule — no execution. |
+| 2026-10-29 08:35 UTC | hitl | human-rejected | Build agent requests: git push origin main | Rejected by operator via HITL interrupt. |
+| 2026-10-29 08:36 UTC | guardrail | security-deny | Build agent requests: rm -rf / | Blocked by deny rule — no execution. |
+| 2026-10-29 08:36 UTC | hitl | human-rejected | Build agent requests: git push origin main | Rejected by operator via HITL interrupt. |

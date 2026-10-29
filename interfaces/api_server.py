@@ -419,6 +419,7 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
                 "- To create a file: write_file(file_path='/folder/filename.py', content='<code>')\n"
                 "- To list files: ls(path='/')\n"
                 "- For shell commands: execute(command='git status') or use execute_command tool\n\n"
+                "- Shell commands run from the workspace with the host PATH/environment, so use them for package installs and Git; execute_command supports timeout_seconds up to 1800.\n"
                 "TASK RULES:\n"
                 "- For simple file creation tasks: call write_file IMMEDIATELY with the correct path and content\n"
                 "- Do NOT over-explore. One ls is enough to understand the structure\n"
@@ -428,7 +429,14 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
             )
 
             _backend = active_harness._backend.backend  # GuardedShellBackend
-            _shell_tool = create_shell_tool(_LocalShell(root_dir=active_harness.root_dir), root_dir=active_harness.root_dir)
+            _shell_tool = create_shell_tool(
+                _LocalShell(
+                    root_dir=active_harness.root_dir,
+                    timeout=900,
+                    inherit_env=True,
+                ),
+                root_dir=active_harness.root_dir,
+            )
             _extra_tools = [_shell_tool] + list(active_harness._tools or [])
 
             agent_to_invoke = active_harness._backend.build_agent(
@@ -696,4 +704,3 @@ async def get_file_content(path: str = Query(..., description="Relative file pat
         return {"path": path, "content": content}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-

@@ -884,6 +884,136 @@ html, body {
   box-shadow: 0 0 12px var(--accent-cyan-glow);
 }
 
+.workspace-picker-popover {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 10px);
+  left: 10px;
+  width: min(360px, calc(100vw - 48px));
+  max-height: min(420px, 55vh);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color-active);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+.input-dock {
+  position: relative;
+}
+
+.workspace-picker-header,
+.workspace-picker-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.workspace-picker-header > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.workspace-picker-header strong {
+  color: var(--text-main);
+  font-size: 12px;
+}
+
+.workspace-picker-header span,
+.workspace-picker-footer span,
+.workspace-picker-empty {
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+
+.workspace-picker-tree {
+  overflow: auto;
+  padding: 5px 0;
+}
+
+.workspace-picker-row {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-right: 10px;
+}
+
+.workspace-picker-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.workspace-picker-row input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent-cyan);
+  cursor: pointer;
+}
+
+.workspace-picker-expand {
+  width: 14px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: var(--text-dim);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.workspace-picker-folder-icon {
+  flex-shrink: 0;
+  color: var(--accent-amber);
+}
+
+.workspace-picker-file-icon {
+  flex-shrink: 0;
+  color: var(--accent-cyan);
+}
+
+.workspace-picker-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-main);
+  background: transparent;
+  border: 0;
+  padding: 3px 0;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.workspace-picker-empty {
+  padding: 16px 12px;
+}
+
+.workspace-picker-footer {
+  border-top: 1px solid var(--border-color);
+  border-bottom: 0;
+}
+
+.workspace-picker-footer button {
+  padding: 4px 10px;
+  color: var(--text-main);
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  border-radius: 5px;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
 .attachments-tray {
   display: flex;
   flex-wrap: wrap;
@@ -901,7 +1031,7 @@ html, body {
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 11px;
-  max-width: 140px;
+  max-width: min(280px, 70vw);
 }
 
 .attachment-chip-thumb {
@@ -912,6 +1042,7 @@ html, body {
 }
 
 .attachment-chip-name {
+  max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
