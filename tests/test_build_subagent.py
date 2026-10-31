@@ -33,6 +33,45 @@ def test_build_dev_subagent_spec():
     assert spec["external_tools"] is ext_mgr
 
 
+def test_build_subagent_guards_prebuilt_tools(tmp_path):
+    import json
+    from agent.guardrail import HarnessGuard
+
+    harness_dir = tmp_path / "harness"
+    harness_dir.mkdir()
+    permissions_path = harness_dir / "permissions.json"
+    permissions_path.write_text(
+        json.dumps({"allow": ["custom_mutation"], "ask": [], "deny": []}),
+        encoding="utf-8",
+    )
+
+    calls = []
+
+    def custom_mutation(value: str) -> str:
+        calls.append(value)
+        return value
+
+    raw_tool = StructuredTool.from_function(
+        func=custom_mutation,
+        name="custom_mutation",
+        description="A prebuilt mutation tool",
+    )
+    external_tools = ExternalToolsManager()
+    external_tools._tavily_tool = None
+    guard = HarnessGuard(str(permissions_path))
+    spec = build_dev_subagent(
+        all_tools=[raw_tool],
+        external_tools=external_tools,
+        root_dir=str(tmp_path),
+        guard=guard,
+    )
+    guarded_tool = next(tool for tool in spec["tools"] if tool.name == "custom_mutation")
+
+    assert guarded_tool is not raw_tool
+    assert guarded_tool.invoke({"value": "approved"}) == "approved"
+    assert calls == ["approved"]
+
+
 def test_probabilistic_decision_uses_ollama_nimble(monkeypatch):
     from langchain_core.messages import AIMessage
     from nodes.build_subagent import create_probabilistic_decision_tool
@@ -102,24 +141,26 @@ def test_execute_command_hitl_guardrail():
 
     guard = HarnessGuard("harness/permissions.json")
     tool = create_shell_tool(backend=mock_backend, guard=guard)
+    run_shell = tool.func
+    assert run_shell is not None
 
     # 1. Test allowed command
-    res_allow = tool.func("git status", timeout_seconds=1200)
+    res_allow = run_shell("git status", timeout_seconds=1200)
     assert "succeeded" in res_allow
     mock_backend.execute.assert_called_with("git status", timeout=1200)
 
     # 2. Test denied dangerous command
-    res_deny = tool.func("rm -rf /")
+    res_deny = run_shell("rm -rf /")
     assert "SECURITY DENIED" in res_deny
 
     # 3. Test ask command with interrupt simulation
     with patch("nodes.build_subagent.interrupt", return_value={"approved": True}) as mock_interrupt:
-        res_ask_approved = tool.func("git push origin main")
+        res_ask_approved = run_shell("git push origin main")
         mock_interrupt.assert_called_once()
         assert "succeeded" in res_ask_approved
 
     with patch("nodes.build_subagent.interrupt", return_value={"approved": False}) as mock_interrupt:
-        res_ask_rejected = tool.func("git push origin main")
+        res_ask_rejected = run_shell("git push origin main")
         assert "HITL REJECTED" in res_ask_rejected
 
 

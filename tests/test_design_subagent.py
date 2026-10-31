@@ -1,13 +1,22 @@
 import asyncio
+import json
 
 from deepagents import create_deep_agent as build_deep_agent
 from deepagents.backends import FilesystemBackend
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 from nodes.design_subagent import make_design_subagent
+from frameworks.deepagents_backend import GuardedShellBackend
 
 
 def test_design_subagent_can_read_and_edit_workspace_files(tmp_path, monkeypatch):
+    harness_dir = tmp_path / "harness"
+    harness_dir.mkdir()
+    (harness_dir / "permissions.json").write_text(
+        json.dumps({"allow": ["Read(*)", "Edit(*)"], "ask": [], "deny": []}),
+        encoding="utf-8",
+    )
+
     class FakeDrawioClient:
         async def get_tools(self):
             return []
@@ -16,7 +25,7 @@ def test_design_subagent_can_read_and_edit_workspace_files(tmp_path, monkeypatch
     captured = {}
 
     def create_agent(**kwargs):
-        assert isinstance(kwargs["backend"], FilesystemBackend)
+        assert isinstance(kwargs["backend"], GuardedShellBackend)
         captured["system_prompt"] = kwargs["system_prompt"]
         captured["backend"] = kwargs["backend"]
         return build_deep_agent(**{**kwargs, "model": model})
@@ -37,6 +46,7 @@ def test_design_subagent_can_read_and_edit_workspace_files(tmp_path, monkeypatch
     assert "read_file" in tools
     assert "edit_file" in tools
     assert "workspace root is mounted at `/`" in captured["system_prompt"]
+    assert isinstance(captured["backend"].raw_backend, FilesystemBackend)
     assert captured["backend"].read("/notes.py").file_data["content"] == "before\n"
 
     captured["backend"].edit("/notes.py", "before", "after")

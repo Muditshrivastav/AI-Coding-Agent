@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from langgraph.types import interrupt
 
 from agent.guardrail import HarnessGuard
+from frameworks.deepagents_backend import GuardedShellBackend
 
 
 PLANNING_SYSTEM_PROMPT = """You are the planning-agent for an autonomous coding harness.
@@ -82,7 +83,7 @@ def make_planning_subagent(
     primary_llm = ChatGroq(model="qwen/qwen3.8-27b", temperature=0.2)
     fallback_llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
     llm = primary_llm.with_fallbacks([fallback_llm])
-    backend = FilesystemBackend(root_dir=root_dir)
+    backend = GuardedShellBackend(FilesystemBackend(root_dir=root_dir), guard)
     middleware = [MemoryMiddleware()]
 
     tools: list[Any] = [write_plan_tool] + list(extra_tools or [])

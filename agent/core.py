@@ -2,7 +2,9 @@
 agent/core.py - CodingAgentHarness: single entry point for running and resuming agent executions.
 """
 
+import asyncio
 import logging
+import uuid
 from typing import Any, AsyncIterator
 from langgraph.types import Command
 from frameworks.deepagents_backend import DeepAgentsBackend
@@ -14,7 +16,7 @@ from tools.api_tools import APIToolset
 from graphrag.ingest_tool import create_repo_ingest_tool
 from graphrag.tool import create_graphrag_retriever_tool
 from agent.guardrail import HarnessGuard
-from agent.state import AgentState, create_initial_state
+from agent.state import AgentState
 from agent.session_manager import SessionManager, SessionMetadata
 from nodes.planning_subagent import planning_subagent
 from nodes.design_subagent import design_subagent
@@ -22,6 +24,7 @@ from nodes.build_subagent import build_dev_subagent
 from frameworks.evaluation import LangSmithTracer, HarnessEvaluator
 from frameworks.agents_md_writer import generate_agents_md
 from skills.registry import skill_library
+from agent.repair_loop import build_repair_graph
 
 logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
@@ -149,10 +152,20 @@ class CodingAgentHarness:
         )
         self._sessions = SessionManager(root_dir=root_dir)
         self._runtime = LangGraphRuntime(session_manager=self._sessions, root_dir=root_dir)
+        self._execution_graphs: dict[str, Any] = {}
         self._external_tools = ExternalToolsManager()
         self._deploy_tools = DeployToolset(root_dir=root_dir)
         self._verification_tools = VerificationToolset(root_dir=root_dir)
         self._api_tools = APIToolset()
+        self._system_prompt = (
+            "You are an autonomous coding harness agent. Always follow AGENTS.md, "
+            "respect permissions.json, coordinate planning -> design -> build, and verify all code.\n"
+            "For code changes, call run_verification after editing. If checks fail, "
+            "diagnose and repair the reported issue, then verify again.\n"
+            "FILESYSTEM PATH RULES: All filesystem tools (ls, read_file, write_file, edit_file) require "
+            "POSIX virtual paths starting with /. Never use Windows paths like C:\\\\path. "
+            "The workspace root is /. Use ls(path='/') to explore, read_file(file_path='/agent/core.py'), etc."
+        )
         # Build tools list with safety wraps for DB-dependent tools
         try:
             self._tools = (
@@ -194,13 +207,7 @@ class CodingAgentHarness:
         self._agent = self._backend.build_agent(
             model=self._model,
             subagents=subagents,
-            system_prompt=(
-                "You are an autonomous coding harness agent. Always follow AGENTS.md, "
-                "respect permissions.json, coordinate planning -> design -> build, and verify all code.\n"
-                "FILESYSTEM PATH RULES: All filesystem tools (ls, read_file, write_file, edit_file) require "
-                "POSIX virtual paths starting with /. Never use Windows paths like C:\\\\path. "
-                "The workspace root is /. Use ls(path='/') to explore, read_file(file_path='/agent/core.py'), etc."
-            ),
+            system_prompt=self._system_prompt,
             checkpointer=self._runtime.checkpointer,
             state_schema=AgentState,
         )
@@ -242,6 +249,56 @@ class CodingAgentHarness:
     def supported_models(self) -> dict[str, dict[str, Any]]:
         """Return dictionary of supported models."""
         return self.SUPPORTED_MODELS
+
+    def create_repair_graph(
+        self,
+        agent: Any | None = None,
+        *,
+        max_repair_rounds: int = 3,
+    ) -> Any:
+        """Create a bounded repair controller around an agent graph."""
+        return build_repair_graph(
+            agent or self._agent,
+            checkpointer=self._runtime.checkpointer,
+            max_repair_rounds=max_repair_rounds,
+        )
+
+    def build_agent_for_model(self, model: str) -> Any:
+        """Build the full planning/design/build agent graph for a model."""
+        chosen_model = normalize_model_identifier(model)
+        if chosen_model == self._model:
+            return self._agent
+
+        subagents = [
+            planning_subagent,
+            design_subagent,
+            build_dev_subagent(
+                self._tools,
+                external_tools=self._external_tools,
+                root_dir=self._root_dir,
+                backend=self._backend.backend,
+                guard=self._guard,
+            ),
+        ]
+        return self._backend.build_agent(
+            model=chosen_model,
+            subagents=subagents,
+            system_prompt=self._system_prompt,
+            checkpointer=self._runtime.checkpointer,
+            state_schema=AgentState,
+        )
+
+    def _conversation_history(self, thread_id: str, user_request: str) -> str:
+        """Format prior persisted turns, excluding the request currently being run."""
+        messages = self._sessions.get_messages(thread_id)
+        if messages and messages[-1].get("sender") == "user" and messages[-1].get("text") == user_request:
+            messages = messages[:-1]
+        recent_messages = messages[-20:]
+        return "\n".join(
+            f"{message.get('sender', 'unknown').capitalize()}: {message.get('text', '')}"
+            for message in recent_messages
+            if message.get("text")
+        )
 
     @property
     def skills(self):
@@ -311,15 +368,6 @@ class CodingAgentHarness:
             title_preview = user_request.strip().split("\n")[0][:40]
             self._sessions.create_session(title=title_preview or f"Session {thread_id[:8]}", session_id=thread_id)
 
-        # Check if thread has prior state in the checkpointer
-        existing_state = await self.get_state(thread_id)
-        if existing_state and "messages" in existing_state:
-            # Subsequent turn in this session: append user message to existing history
-            input_payload: Any = {"messages": [{"role": "user", "content": user_request}]}
-        else:
-            # First turn: initialize full AgentState
-            input_payload = create_initial_state(user_request)
-
         self._sessions.update_session(thread_id, increment_messages=True, status="active")
         await self._runtime.persist_session_to_memory(thread_id)
 
@@ -333,35 +381,24 @@ class CodingAgentHarness:
             model=chosen_model,
         )
 
-        agent_to_invoke = self._agent
-        if chosen_model != self._model:
-            # Dynamically build agent with requested model override
-            subagents = [
-                planning_subagent,
-                design_subagent,
-                build_dev_subagent(
-                    self._tools,
-                    external_tools=self._external_tools,
-                    root_dir=self._root_dir,
-                    backend=self._backend.backend,
-                    guard=self._guard,
-                ),
-            ]
-            agent_to_invoke = self._backend.build_agent(
-                model=chosen_model,
-                subagents=subagents,
-                system_prompt=(
-                    "You are an autonomous coding harness agent. Always follow AGENTS.md, "
-                    "respect permissions.json, coordinate planning -> design -> build, and verify all code."
-                ),
-                checkpointer=self._runtime.checkpointer,
-                state_schema=AgentState,
-            )
+        agent_to_invoke = self.build_agent_for_model(chosen_model)
 
-        result = await agent_to_invoke.ainvoke(
-            input_payload,
-            config=config,
-        )
+        execution_graph = self.create_repair_graph(agent_to_invoke)
+        self._execution_graphs[thread_id] = execution_graph
+        try:
+            result = await execution_graph.ainvoke(
+                {
+                    "user_request": user_request,
+                    "conversation_history": self._conversation_history(thread_id, user_request),
+                    "execution_thread_id": f"{thread_id}:execution:{uuid.uuid4()}",
+                    "repair_round": 0,
+                    "max_repair_rounds": 3,
+                },
+                config=config,
+            )
+        except asyncio.CancelledError:
+            self._execution_graphs.pop(thread_id, None)
+            raise
 
         if isinstance(result, dict) and result.get("__interrupt__"):
             self._sessions.update_session(thread_id, status="awaiting_approval")
@@ -370,12 +407,18 @@ class CodingAgentHarness:
 
         self._sessions.update_session(thread_id, status="active")
         await self._runtime.persist_session_to_memory(thread_id)
-        return {"status": "complete", "result": result}
+        self._execution_graphs.pop(thread_id, None)
+        return {
+            "status": result.get("status", "complete"),
+            "output": result.get("final_output", "Task completed."),
+            "result": result,
+        }
 
     async def resume(self, thread_id: str, approved: bool) -> dict[str, Any]:
         """Resumes an interrupted execution upon HITL decision."""
         config = {"configurable": {"thread_id": thread_id}}
-        result = await self._agent.ainvoke(
+        graph = self._execution_graphs.get(thread_id, self._agent)
+        result = await graph.ainvoke(
             Command(resume={"approved": approved}),
             config=config,
         )
@@ -386,13 +429,21 @@ class CodingAgentHarness:
 
         self._sessions.update_session(thread_id, status="active")
         await self._runtime.persist_session_to_memory(thread_id)
+        if graph is not self._agent and isinstance(result, dict):
+            self._execution_graphs.pop(thread_id, None)
+            return {
+                "status": result.get("status", "complete"),
+                "output": result.get("final_output", "Task completed."),
+                "result": result,
+            }
         return {"status": "complete", "result": result}
 
     async def get_state(self, thread_id: str) -> dict[str, Any] | None:
         """Retrieves the current state of a thread from checkpointer."""
         config = {"configurable": {"thread_id": thread_id}}
         try:
-            snapshot = await self._agent.aget_state(config)
+            graph = self._execution_graphs.get(thread_id, self._agent)
+            snapshot = await graph.aget_state(config)
             return snapshot.values if snapshot else None
         except Exception:
             return None

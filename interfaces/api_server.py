@@ -291,6 +291,10 @@ async def start_run(req: RunRequest) -> dict[str, Any]:
         }
     finally:
         active_run_tasks.pop(thread_id, None)
+        if harness is not None:
+            session = harness.sessions.get_session(thread_id)
+            if not session or session.status != "awaiting_approval":
+                harness._execution_graphs.pop(thread_id, None)
 
 import json as _json
 
@@ -335,6 +339,14 @@ def _is_groq_rate_limit(exc: Exception) -> bool:
     return False
 
 
+def _interrupt_details(interrupts: Any) -> dict[str, Any]:
+    if not interrupts:
+        return {}
+    first = interrupts[0]
+    raw = getattr(first, "value", first) if not isinstance(first, dict) else first
+    return raw if isinstance(raw, dict) else {}
+
+
 _OLLAMA_FALLBACKS = [
     {"id": "ollama:gpt-oss:120b-cloud",            "label": "GPT-OSS 120B (Cloud)"},
     {"id": "ollama:gemma4:cloud",                  "label": "Gemma 4 (Cloud)"},
@@ -364,7 +376,7 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
       data: {"type": "tool_call",   "tool": "<name>", "input": "<summary>", "id": "<id>"}
       data: {"type": "tool_result", "tool": "<name>", "output": "<summary>", "id": "<id>", "lines": N}
       data: {"type": "text_delta",  "text": "<chunk>"}
-      data: {"type": "done",        "output": "<full text>", "status": "complete|stopped|error"}
+      data: {"type": "done",        "output": "<full text>", "status": "complete|needs_attention|stopped|error"}
     """
     global harness
     if harness is None:
@@ -378,21 +390,16 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
         active_harness = harness
         if active_harness is None:
             return
-            
-        output_text = ""
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            active_run_tasks[thread_id] = current_task
+
         try:
             config = {"configurable": {"thread_id": thread_id}}
-
-            from agent.state import create_initial_state
-            existing_state = await active_harness.get_state(thread_id)
-            if existing_state and "messages" in existing_state:
-                input_payload = {"messages": [{"role": "user", "content": req.user_request}]}
-            else:
-                input_payload = create_initial_state(req.user_request)
-
             if not active_harness.sessions.has_session(thread_id):
                 title_preview = req.user_request.strip().split("\n")[0][:40]
                 active_harness.sessions.create_session(title=title_preview or f"Session {thread_id[:8]}", session_id=thread_id)
+            conversation_history = active_harness._conversation_history(thread_id, req.user_request)
 
             from agent.core import normalize_model_identifier
             from frameworks.agents_md_writer import generate_agents_md
@@ -403,146 +410,79 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
                 model=chosen_model,
             )
 
-            # ── Build a lightweight direct agent for the streaming endpoint ──────
-            # Using the full multi-subagent pipeline (planning → design → build)
-            # caused the model to do multiple ls/read_file orientation loops
-            # through each subagent before ever attempting to write a file.
-            # Instead, build a single flat agent with direct filesystem + shell tools.
-            from nodes.build_subagent import create_shell_tool
-            from deepagents.backends import LocalShellBackend as _LocalShell
+            agent_to_invoke = active_harness.build_agent_for_model(chosen_model)
 
-            _direct_system_prompt = (
-                "You are a direct coding assistant. Execute the user's task immediately.\n"
-                "FILESYSTEM PATH RULES (CRITICAL):\n"
-                "- ALL file tools (ls, read_file, write_file, edit_file) require POSIX paths starting with /\n"
-                "- NEVER use Windows paths. The workspace root is /\n"
-                "- To create a file: write_file(file_path='/folder/filename.py', content='<code>')\n"
-                "- To list files: ls(path='/')\n"
-                "- For shell commands: execute(command='git status') or use execute_command tool\n\n"
-                "- Shell commands run from the workspace with the host PATH/environment, so use them for package installs and Git; execute_command supports timeout_seconds up to 1800.\n"
-                "TASK RULES:\n"
-                "- For simple file creation tasks: call write_file IMMEDIATELY with the correct path and content\n"
-                "- Do NOT over-explore. One ls is enough to understand the structure\n"
-                "- Do NOT call ls more than twice before writing\n"
-                "- Write complete, working code — not placeholders\n"
-                "- After writing, confirm with a short message what was created"
-            )
-
-            _backend = active_harness._backend.backend  # GuardedShellBackend
-            _shell_tool = create_shell_tool(
-                _LocalShell(
-                    root_dir=active_harness.root_dir,
-                    timeout=900,
-                    inherit_env=True,
-                ),
-                root_dir=active_harness.root_dir,
-            )
-            _extra_tools = [_shell_tool] + list(active_harness._tools or [])
-
-            agent_to_invoke = active_harness._backend.build_agent(
-                model=chosen_model if chosen_model else active_harness._model,
-                subagents=[],
-                system_prompt=_direct_system_prompt,
-                checkpointer=active_harness._runtime.checkpointer,
-                tools=_extra_tools,
-            )
-
-            # ── Single astream: emits tool events AND collects final output ─────
-            # Using astream only (no parallel ainvoke) avoids the double-execution
-            # race condition where ainvoke and astream both run the graph on the
-            # same thread_id checkpoint, causing each tool to fire twice.
-            last_result: dict = {}
-
-            async def stream_events():
-                nonlocal output_text, last_result
-                try:
-                    async for chunk in agent_to_invoke.astream(
-                        input_payload, config=config, stream_mode="updates"
-                    ):
-                        # chunk is {node_name: state_update}
+            execution_graph = active_harness.create_repair_graph(agent_to_invoke)
+            active_harness._execution_graphs[thread_id] = execution_graph
+            result_state: dict[str, Any] = {}
+            try:
+                async for mode, chunk in execution_graph.astream(
+                    {
+                        "user_request": req.user_request,
+                        "conversation_history": conversation_history,
+                        "execution_thread_id": f"{thread_id}:execution:{uuid.uuid4()}",
+                        "repair_round": 0,
+                        "max_repair_rounds": 3,
+                    },
+                    config=config,
+                    stream_mode=["custom", "values"],
+                ):
+                    if mode == "custom":
                         if isinstance(chunk, dict):
-                            last_result = chunk  # keep last for final-text extraction
-                        for node_name, update in (chunk.items() if isinstance(chunk, dict) else []):
-                            msgs = update.get("messages", []) if isinstance(update, dict) else []
-                            for m in (msgs if isinstance(msgs, list) else []):
-                                mtype = getattr(m, "type", "") or ""
-                                if mtype == "tool":
-                                    name = getattr(m, "name", "tool") or "tool"
-                                    raw_content = getattr(m, "content", "") or ""
-                                    content_str = raw_content if isinstance(raw_content, str) else _json.dumps(raw_content)
-                                    lines = content_str.count("\n") + 1
-                                    summary = content_str.split("\n")[0][:120] if content_str else ""
-                                    tool_id = getattr(m, "tool_call_id", "") or ""
-                                    ev = _json.dumps({"type": "tool_result", "tool": name, "output": summary, "id": tool_id, "lines": lines})
-                                    yield f"data: {ev}\n\n"
-                                elif mtype == "ai":
-                                    tool_calls = getattr(m, "tool_calls", []) or []
-                                    for tc in tool_calls:
-                                        tc_name = tc.get("name", "tool") if isinstance(tc, dict) else getattr(tc, "name", "tool")
-                                        tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
-                                        tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
-                                        args_str = _json.dumps(tc_args) if isinstance(tc_args, dict) else str(tc_args)
-                                        ev = _json.dumps({"type": "tool_call", "tool": tc_name, "input": args_str[:120], "id": tc_id})
-                                        yield f"data: {ev}\n\n"
-                                    content = getattr(m, "content", "") or ""
-                                    if isinstance(content, str) and content.strip() and not tool_calls:
-                                        output_text = content.strip()
-                                        ev = _json.dumps({"type": "text_delta", "text": content})
-                                        yield f"data: {ev}\n\n"
-                except Exception as se:
-                    se_type = type(se).__name__
-                    if se_type in ("GraphInterrupt", "NodeInterrupt"):
-                        interrupts = getattr(se, "interrupts", None) or []
-                        payload: dict = {}
-                        if interrupts:
-                            first = interrupts[0]
-                            raw = getattr(first, "value", first) if not isinstance(first, dict) else first
-                            if isinstance(raw, dict):
-                                payload = raw
-                        interrupt_ev = _json.dumps({
-                            "type": "interrupt",
-                            "description": payload.get("description") or payload.get("signature", "Action requires approval"),
-                            "action": payload.get("signature", "Shell / File modification"),
-                            "payload": payload,
-                        })
-                        yield f"data: {interrupt_ev}\n\n"
-                        logger.info(f"🛡️ HITL interrupt raised for thread {thread_id}: {payload}")
-                        return  # stop streaming — graph is paused awaiting resume
-                    elif _is_groq_rate_limit(se):
-                        rl_ev = _json.dumps(_make_rate_limit_event(chosen_model))
-                        yield f"data: {rl_ev}\n\n"
-                    else:
-                        logger.warning(f"Stream events error: {se}")
+                            event = _json.dumps(chunk)
+                            yield f"data: {event}\n\n"
+                    elif mode == "values" and isinstance(chunk, dict):
+                        result_state = chunk
+            except Exception as stream_error:
+                if type(stream_error).__name__ in ("GraphInterrupt", "NodeInterrupt"):
+                    payload = _interrupt_details(getattr(stream_error, "interrupts", None))
+                    active_harness.sessions.update_session(thread_id, status="awaiting_approval")
+                    await active_harness._runtime.persist_session_to_memory(thread_id)
+                    interrupt_event = _json.dumps({
+                        "type": "interrupt",
+                        "description": payload.get("description") or payload.get("signature", "Action requires approval"),
+                        "action": payload.get("signature", "Shell / File modification"),
+                        "payload": payload,
+                    })
+                    yield f"data: {interrupt_event}\n\n"
+                    logger.info(f"HITL interrupt raised for thread {thread_id}: {payload}")
+                    return
+                raise
 
-            async for ev in stream_events():
-                yield ev
+            if result_state.get("__interrupt__"):
+                payload = _interrupt_details(result_state["__interrupt__"])
+                active_harness.sessions.update_session(thread_id, status="awaiting_approval")
+                await active_harness._runtime.persist_session_to_memory(thread_id)
+                interrupt_event = _json.dumps({
+                    "type": "interrupt",
+                    "description": payload.get("description") or payload.get("signature", "Action requires approval"),
+                    "action": payload.get("signature", "Shell / File modification"),
+                    "payload": payload,
+                })
+                yield f"data: {interrupt_event}\n\n"
+                logger.info(f"HITL interrupt raised for thread {thread_id}: {payload}")
+                return
 
-            # Extract final AI text from last streamed chunk if not captured above
-            if not output_text and last_result:
-                for node_name, update in last_result.items():
-                    for msg in reversed((update.get("messages", []) if isinstance(update, dict) else [])):
-                        role = getattr(msg, "type", "") or getattr(msg, "role", "")
-                        if role in ("ai", "assistant"):
-                            ct = getattr(msg, "content", "") or ""
-                            if isinstance(ct, str) and ct.strip():
-                                output_text = ct.strip()
-                                break
-                    if output_text:
-                        break
-
-            if not output_text:
+            output_text = result_state.get("final_output", "Task completed.")
+            if not isinstance(output_text, str) or not output_text.strip():
                 output_text = "Task completed."
 
             active_harness.sessions.update_session(thread_id, status="active")
             await active_harness._runtime.persist_session_to_memory(thread_id)
             active_harness.sessions.save_message(thread_id, sender="agent", text=output_text)
-            done_ev = _json.dumps({"type": "done", "output": output_text, "status": "complete"})
+            active_harness._execution_graphs.pop(thread_id, None)
+            done_ev = _json.dumps({
+                "type": "done",
+                "output": output_text,
+                "status": result_state.get("status", "complete"),
+            })
             yield f"data: {done_ev}\n\n"
 
 
         except Exception as exc:
             import traceback
             logger.error(f"Stream run error: {exc}\n{traceback.format_exc()}")
+            active_harness._execution_graphs.pop(thread_id, None)
             if _is_groq_rate_limit(exc):
                 rl_ev = _json.dumps(_make_rate_limit_event(chosen_model))
                 yield f"data: {rl_ev}\n\n"
@@ -553,6 +493,9 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
             yield f"data: {done_ev}\n\n"
         finally:
             active_run_tasks.pop(thread_id, None)
+            session = active_harness.sessions.get_session(thread_id)
+            if not session or session.status != "awaiting_approval":
+                active_harness._execution_graphs.pop(thread_id, None)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -589,6 +532,8 @@ async def resume_run(thread_id: str, req: ResumeRequest) -> dict[str, Any]:
 
     active_harness = harness
     result = await active_harness.resume(thread_id, approved=req.approved)
+    if result.get("status") != "awaiting_approval" and result.get("output"):
+        active_harness.sessions.save_message(thread_id, sender="agent", text=result["output"])
     return {"thread_id": thread_id, **result}
 
 

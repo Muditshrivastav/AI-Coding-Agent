@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -248,6 +248,15 @@ class TestEnforce:
         guard.enforce("Bash(pytest -q)", interrupt_fn=interrupt_fn)
         interrupt_fn.assert_not_called()
 
+    def test_enforce_unknown_action_requests_approval(self, tmp_path):
+        guard, _, _ = _make_guard(tmp_path)
+        interrupt_fn = MagicMock(return_value={"approved": True})
+
+        guard.enforce("unlisted_action", interrupt_fn=interrupt_fn)
+
+        interrupt_fn.assert_called_once()
+        assert interrupt_fn.call_args.args[0]["permission_level"] == "ask"
+
     def test_enforce_description_overrides_label_in_log(self, tmp_path):
         """description kwarg should appear in failures.md row instead of raw signature."""
         guard, _, failures_file = _make_guard(tmp_path)
@@ -368,12 +377,12 @@ class TestWrapToolWithGuard:
         assert result == "deployed"
         interrupt_fn.assert_called_once()
 
-    def test_wrap_tool_without_func_returns_original(self, tmp_path):
-        """A tool without a .func attribute must be returned unchanged."""
+    def test_wrap_tool_without_callable_fails_closed(self, tmp_path):
+        """A tool without a callable must not bypass permission enforcement."""
         guard, _, _ = _make_guard(tmp_path)
         fake_tool = MagicMock(spec=[])  # no .func attribute
-        result = guard.wrap_tool_with_guard(fake_tool)
-        assert result is fake_tool
+        with pytest.raises(TypeError, match="cannot be permission-guarded"):
+            guard.wrap_tool_with_guard(fake_tool)
 
     def test_wrapped_tool_description_has_hitl_prefix(self, tmp_path):
         guard, _, _ = _make_guard(tmp_path)
@@ -386,3 +395,50 @@ class TestWrapToolWithGuard:
         tool = self._make_tool("Bash(pytest -q)")
         wrapped = guard.wrap_tool_with_guard(tool)
         assert wrapped.name == tool.name
+
+
+class TestGuardedFilesystemBackend:
+    def test_read_normalizes_virtual_path_before_permission_check(self, tmp_path):
+        from deepagents.backends import FilesystemBackend
+        from frameworks.deepagents_backend import GuardedShellBackend
+
+        guard, _, _ = _make_guard(tmp_path)
+        raw_backend = FilesystemBackend(root_dir=str(tmp_path))
+        (tmp_path / ".env").write_text("SECRET=value", encoding="utf-8")
+        backend = GuardedShellBackend(raw_backend, guard)
+
+        with pytest.raises(PermissionError, match="SECURITY DENIED"):
+            backend.read("/.env")
+
+    def test_glob_applies_read_rules_to_matched_path(self, tmp_path):
+        from deepagents.backends import FilesystemBackend
+        from frameworks.deepagents_backend import GuardedShellBackend
+
+        guard, _, _ = _make_guard(tmp_path)
+        backend = GuardedShellBackend(FilesystemBackend(root_dir=str(tmp_path)), guard)
+
+        with pytest.raises(PermissionError, match="SECURITY DENIED"):
+            backend.glob(".env", path="/")
+
+    def test_write_honors_ask_rule_before_mutating(self, tmp_path):
+        from deepagents.backends import FilesystemBackend
+        from frameworks.deepagents_backend import GuardedShellBackend
+
+        rules = {
+            "allow": ["Edit(*)"],
+            "ask": ["Edit(plan.md)"],
+            "deny": [],
+        }
+        guard, _, _ = _make_guard(tmp_path, rules)
+        backend = GuardedShellBackend(FilesystemBackend(root_dir=str(tmp_path)), guard)
+        captured = {}
+
+        def approve(payload):
+            captured.update(payload)
+            return {"approved": True}
+
+        with patch("langgraph.types.interrupt", side_effect=approve):
+            backend.write("/plan.md", "approved plan")
+
+        assert captured["signature"] == "Edit(plan.md)"
+        assert (tmp_path / "plan.md").read_text(encoding="utf-8") == "approved plan"

@@ -31,6 +31,7 @@ It is built on **LangGraph + Deep Agents**, talks to external services through *
 - **Single shared LangGraph state** across all three stages, with checkpointing so an interrupted run resumes where it stopped.
 - **MCP tool access** to GitHub, Vercel, Render and Chrome DevTools via the official MCP Python SDK.
 - **Automated verification loop**: lint, format, unit tests, then end-to-end checks in a real browser. Failures feed the actual error text into the next attempt.
+- **Whole-agent repair loop**: a top-level LangGraph controller wraps the planning/design/build agent graph, streams its tool activity, and re-enters the full graph with failure diagnostics for up to three repair rounds. Human-approval interrupts remain resumable.
 - **Human-in-the-loop approval** before file writes, `git push` and deploys, configured through `permissions.json`.
 - **GraphRAG retrieval** over your repository (AST-based chunking, Neo4j graph and vectors, cross-encoder reranking), with RAGAS faithfulness scoring to catch ungrounded code.
 - **Docker sandbox** for shell execution, so commands never touch your real repository directly.
@@ -122,7 +123,7 @@ All three stages operate on one LangGraph `AgentState`: the user request, `plan_
 
 `CodingAgentHarness` exposes exactly two entry points, both scoped to a `thread_id`:
 
-- `run(user_request, thread_id)` starts a build. It returns either a final result or an `awaiting_approval` status when a human decision is needed.
+- `run(user_request, thread_id)` starts the bounded whole-agent repair loop. It returns either a final result or an `awaiting_approval` status when a human decision is needed.
 - `resume(thread_id, approved)` continues a paused run from its checkpoint.
 
 Because both are thread-scoped, a crashed or interrupted build resumes where it stopped instead of restarting planning, design and build.

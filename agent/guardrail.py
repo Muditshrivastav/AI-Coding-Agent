@@ -21,7 +21,6 @@ Every denied or rejected event is appended to ``harness/failures.md`` as a struc
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
@@ -203,7 +202,7 @@ class HarnessGuard:
             if fnmatch(action_signature, pattern):
                 return "allow"
 
-        return "allow"  # Default: allow unrecognised actions (explicit deny/ask rules cover dangerous ops)
+        return "ask"
 
     # ------------------------------------------------------------------
     # HITL enforcement pipeline (deny → ask → allow)
@@ -378,26 +377,57 @@ class HarnessGuard:
         except ImportError:
             return tool  # langchain_core not installed — pass through
 
-        original_func: Callable[..., Any] | None = getattr(tool, "func", None)
-        if original_func is None:
-            return tool  # Not a StructuredTool with .func — return as-is
-
         tool_name: str = getattr(tool, "name", "unknown_tool")
         tool_desc: str = getattr(tool, "description", "")
+        if tool_desc.startswith("[HITL-guarded]"):
+            return tool
+
+        original_func: Callable[..., Any] | None = getattr(tool, "func", None)
+        original_coroutine: Callable[..., Any] | None = getattr(tool, "coroutine", None)
+        if original_func is None and original_coroutine is None:
+            invoke = getattr(tool, "invoke", None)
+            ainvoke = getattr(tool, "ainvoke", None)
+            if not callable(invoke) or not callable(ainvoke):
+                raise TypeError(
+                    f"Tool '{tool_name}' cannot be permission-guarded because it exposes "
+                    "neither a synchronous/asynchronous function nor invoke/ainvoke."
+                )
+
+            def invoke_sync(*args: Any, **kwargs: Any) -> Any:
+                tool_input = kwargs if kwargs else args[0] if args else {}
+                return invoke(tool_input)
+
+            async def invoke_async(*args: Any, **kwargs: Any) -> Any:
+                tool_input = kwargs if kwargs else args[0] if args else {}
+                return await ainvoke(tool_input)
+
+            original_func = invoke_sync
+            original_coroutine = invoke_async
+
         tool_schema: Any = getattr(tool, "args_schema", None)
 
         guard_self = self  # capture for closure
 
-        @functools.wraps(original_func)
-        def _guarded(*args: Any, **kwargs: Any) -> Any:
-            guard_self.enforce(tool_name, interrupt_fn=interrupt_fn)
-            return original_func(*args, **kwargs)
-
         wrapped_kwargs: dict[str, Any] = {
-            "func": _guarded,
             "name": tool_name,
             "description": f"[HITL-guarded] {tool_desc}",
         }
+        if original_func is not None:
+            @functools.wraps(original_func)
+            def _guarded(*args: Any, **kwargs: Any) -> Any:
+                guard_self.enforce(tool_name, interrupt_fn=interrupt_fn)
+                return original_func(*args, **kwargs)
+
+            wrapped_kwargs["func"] = _guarded
+
+        if original_coroutine is not None:
+            @functools.wraps(original_coroutine)
+            async def _guarded_async(*args: Any, **kwargs: Any) -> Any:
+                guard_self.enforce(tool_name, interrupt_fn=interrupt_fn)
+                return await original_coroutine(*args, **kwargs)
+
+            wrapped_kwargs["coroutine"] = _guarded_async
+
         if tool_schema is not None:
             wrapped_kwargs["args_schema"] = tool_schema
 

@@ -6,12 +6,13 @@ GuardedShellBackend fully implements deepagents.backends.protocol.BackendProtoco
 FilesystemMiddleware and SubAgentMiddleware can perform class-level introspection without
 hitting 'AttributeError: type object … has no attribute …'.
 
-Guarded methods (write, edit, delete, execute) pass through the three-gate HITL pipeline
-before touching the filesystem or shell.  All other protocol methods are forwarded
-transparently to the underlying backend instance.
+Guarded methods (read, write, edit, delete, execute, upload, download) pass through the
+three-gate permission pipeline before accessing the filesystem or shell. Remaining
+backend-specific attributes are forwarded transparently.
 """
 
 import os
+import posixpath
 from typing import Any
 
 from deepagents.backends import LocalShellBackend
@@ -23,17 +24,14 @@ from frameworks.docker_sandbox import DockerSandboxBackend
 
 class GuardedShellBackend(BackendProtocol):
     """Wraps LocalShellBackend or DockerSandboxBackend, enforcing HarnessGuard (HITL) on
-    all shell and mutating filesystem operations.
+    shell and filesystem operations.
 
-    Inherits from ``BackendProtocol`` so that deepagents middleware (FilesystemMiddleware,
-    SubAgentMiddleware, etc.) can discover the full interface via normal class introspection
-    without triggering ``AttributeError`` on the *type* object.
+    Inherits from ``BackendProtocol`` so that deepagents middleware can discover the
+    expected interface via normal class introspection.
 
-    Guarded operations (execute, write, edit, delete) go through the three-gate
-    deny → ask → allow pipeline before the call reaches the underlying backend.
-    Read-only or structural operations (ls, read, glob, grep, upload_files,
-    download_files) are forwarded directly — HarnessGuard is still available for
-    callers that want to add read-guards at a higher level.
+    Guarded operations go through the deny → ask → allow pipeline before the call
+    reaches the underlying backend. Paths are normalized to workspace-relative
+    form so permissions patterns work with POSIX virtual paths.
     """
 
     def __init__(self, backend: Any, guard: HarnessGuard) -> None:
@@ -47,6 +45,24 @@ class GuardedShellBackend(BackendProtocol):
     @property
     def raw_backend(self) -> Any:
         return self._backend
+
+    @staticmethod
+    def _permission_path(path: str) -> str:
+        normalized = path.replace("\\", "/").lstrip("/")
+        return normalized or "."
+
+    @classmethod
+    def _search_target(cls, path: str | None, pattern: str | None = None) -> str:
+        normalized_path = cls._permission_path(path) if path else ""
+        target = posixpath.normpath(posixpath.join(normalized_path, pattern or ""))
+        return target[2:] if target.startswith("./") else target or "."
+
+    def _enforce_path(self, action: str, path: str, description: str) -> None:
+        normalized = self._permission_path(path)
+        self._guard.enforce(
+            f"{action}({normalized})",
+            description=description,
+        )
 
     # ------------------------------------------------------------------
     # GUARDED — mutating / shell operations
@@ -75,10 +91,7 @@ class GuardedShellBackend(BackendProtocol):
 
     def write(self, file_path: str, content: str) -> Any:
         """Guard file writes (Edit/Write pattern) before delegating to backend."""
-        self._guard.enforce(
-            f"Edit({file_path})",
-            description=f"Write file: {file_path}",
-        )
+        self._enforce_path("Edit", file_path, f"Write file: {file_path}")
         if hasattr(self._backend, "write"):
             return self._backend.write(file_path, content)
         # Graceful fallback for backends that expose write_file instead
@@ -96,10 +109,7 @@ class GuardedShellBackend(BackendProtocol):
 
     async def awrite(self, file_path: str, content: str) -> Any:
         """Async write — guard is synchronous, I/O is async."""
-        self._guard.enforce(
-            f"Edit({file_path})",
-            description=f"Write file: {file_path}",
-        )
+        self._enforce_path("Edit", file_path, f"Write file: {file_path}")
         if hasattr(self._backend, "awrite"):
             return await self._backend.awrite(file_path, content)
         import asyncio
@@ -113,10 +123,7 @@ class GuardedShellBackend(BackendProtocol):
         replace_all: bool = False,  # noqa: FBT001, FBT002
     ) -> Any:
         """Guard file edits before delegating to backend."""
-        self._guard.enforce(
-            f"Edit({file_path})",
-            description=f"Edit file: {file_path}",
-        )
+        self._enforce_path("Edit", file_path, f"Edit file: {file_path}")
         return self._backend.edit(file_path, old_string, new_string, replace_all)
 
     async def aedit(
@@ -127,10 +134,7 @@ class GuardedShellBackend(BackendProtocol):
         replace_all: bool = False,  # noqa: FBT001, FBT002
     ) -> Any:
         """Async edit."""
-        self._guard.enforce(
-            f"Edit({file_path})",
-            description=f"Edit file: {file_path}",
-        )
+        self._enforce_path("Edit", file_path, f"Edit file: {file_path}")
         if hasattr(self._backend, "aedit"):
             return await self._backend.aedit(file_path, old_string, new_string, replace_all)
         import asyncio
@@ -140,49 +144,51 @@ class GuardedShellBackend(BackendProtocol):
 
     def delete(self, file_path: str) -> Any:
         """Guard file/directory deletion before delegating to backend."""
-        self._guard.enforce(
-            f"Delete({file_path})",
-            description=f"Delete path: {file_path}",
-        )
+        self._enforce_path("Delete", file_path, f"Delete path: {file_path}")
         return self._backend.delete(file_path)
 
     async def adelete(self, file_path: str) -> Any:
         """Async delete."""
-        self._guard.enforce(
-            f"Delete({file_path})",
-            description=f"Delete path: {file_path}",
-        )
+        self._enforce_path("Delete", file_path, f"Delete path: {file_path}")
         if hasattr(self._backend, "adelete"):
             return await self._backend.adelete(file_path)
         import asyncio
         return await asyncio.to_thread(self._backend.delete, file_path)
 
     # ------------------------------------------------------------------
-    # READ-ONLY / STRUCTURAL — forwarded directly (no guard gate)
+    # READ-ONLY / STRUCTURAL
     # ------------------------------------------------------------------
 
     def ls(self, path: str) -> Any:
+        self._enforce_path("Read", path, f"List directory: {path}")
         return self._backend.ls(path)
 
     async def als(self, path: str) -> Any:
+        self._enforce_path("Read", path, f"List directory: {path}")
         if hasattr(self._backend, "als"):
             return await self._backend.als(path)
         import asyncio
         return await asyncio.to_thread(self._backend.ls, path)
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> Any:
+        self._enforce_path("Read", file_path, f"Read file: {file_path}")
         return self._backend.read(file_path, offset, limit)
 
     async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> Any:
+        self._enforce_path("Read", file_path, f"Read file: {file_path}")
         if hasattr(self._backend, "aread"):
             return await self._backend.aread(file_path, offset, limit)
         import asyncio
         return await asyncio.to_thread(self._backend.read, file_path, offset, limit)
 
     def glob(self, pattern: str, path: str | None = None) -> Any:
+        target = self._search_target(path, pattern)
+        self._enforce_path("Read", target, f"Find files matching {pattern}")
         return self._backend.glob(pattern, path)
 
     async def aglob(self, pattern: str, path: str | None = None) -> Any:
+        target = self._search_target(path, pattern)
+        self._enforce_path("Read", target, f"Find files matching {pattern}")
         if hasattr(self._backend, "aglob"):
             return await self._backend.aglob(pattern, path)
         import asyncio
@@ -196,6 +202,8 @@ class GuardedShellBackend(BackendProtocol):
         *,
         max_count: int | None = None,
     ) -> Any:
+        target = self._search_target(path, glob)
+        self._enforce_path("Read", target, f"Search files under {target}")
         kwargs: dict[str, Any] = {}
         if glob is not None:
             kwargs["glob"] = glob
@@ -211,6 +219,8 @@ class GuardedShellBackend(BackendProtocol):
         *,
         max_count: int | None = None,
     ) -> Any:
+        target = self._search_target(path, glob)
+        self._enforce_path("Read", target, f"Search files under {target}")
         kwargs: dict[str, Any] = {}
         if glob is not None:
             kwargs["glob"] = glob
@@ -222,18 +232,26 @@ class GuardedShellBackend(BackendProtocol):
         return await asyncio.to_thread(self._backend.grep, pattern, path, **kwargs)
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> Any:
+        for path, _ in files:
+            self._enforce_path("Edit", path, f"Upload file: {path}")
         return self._backend.upload_files(files)
 
     async def aupload_files(self, files: list[tuple[str, bytes]]) -> Any:
+        for path, _ in files:
+            self._enforce_path("Edit", path, f"Upload file: {path}")
         if hasattr(self._backend, "aupload_files"):
             return await self._backend.aupload_files(files)
         import asyncio
         return await asyncio.to_thread(self._backend.upload_files, files)
 
     def download_files(self, paths: list[str]) -> Any:
+        for path in paths:
+            self._enforce_path("Read", path, f"Download file: {path}")
         return self._backend.download_files(paths)
 
     async def adownload_files(self, paths: list[str]) -> Any:
+        for path in paths:
+            self._enforce_path("Read", path, f"Download file: {path}")
         if hasattr(self._backend, "adownload_files"):
             return await self._backend.adownload_files(paths)
         import asyncio
@@ -406,4 +424,3 @@ class DeepAgentsBackend:
             ])
 
         return agent
-

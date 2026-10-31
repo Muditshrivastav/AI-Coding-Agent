@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from langgraph.types import interrupt
 
 from agent.guardrail import HarnessGuard
+from frameworks.deepagents_backend import GuardedShellBackend
 from frameworks.mcp_client import DrawioMCPClient, drawio_mcp_client
 
 DESIGN_SYSTEM_PROMPT = """You are the design-agent for an autonomous coding harness.
@@ -101,7 +102,7 @@ async def make_design_subagent(
 
     primary_llm = ChatGroq(model="qwen/qwen3.8-27b", temperature=0.2)
     fallback_llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
-    backend = FilesystemBackend(root_dir=root_dir)
+    backend = GuardedShellBackend(FilesystemBackend(root_dir=root_dir), guard)
 
     drawio: DrawioMCPClient = drawio_mcp_client()
     drawio_tools = await drawio.get_tools()  # POSTs initialize, then list_tools

@@ -16,6 +16,7 @@ from langchain_groq import ChatGroq
 from langchain_ollama import ChatOllama
 
 from frameworks.external_tools import ExternalToolsManager
+from frameworks.deepagents_backend import GuardedShellBackend
 from frameworks.mcp_client import (
     MCPClientWrapper,
     RenderMCPClient,
@@ -93,7 +94,7 @@ class ShellCommandArgs(BaseModel):
     )
 
 def create_shell_tool(
-    backend: LocalShellBackend,
+    backend: Any,
     guard: HarnessGuard | None = None,
     root_dir: str = ".",
 ) -> StructuredTool:
@@ -116,7 +117,8 @@ def create_shell_tool(
             return str(exc)
 
         # Gate passed — execute safely via LocalShellBackend
-        res = backend.execute(cmd_stripped, timeout=timeout_seconds)
+        execution_backend = getattr(backend, "raw_backend", backend)
+        res = execution_backend.execute(cmd_stripped, timeout=timeout_seconds)
         output = (res.output or "").strip()
         status = "succeeded" if res.exit_code == 0 else f"failed with exit code {res.exit_code}"
         return f"[Command {status}]\n{output}" if output else f"[Command {status}]"
@@ -174,6 +176,7 @@ async def get_build_dev_tools(
     mcp_clients: list[BuildMCPClient] | None = None,
     include_deploy: bool = True,
     root_dir: str = ".",
+    guard: HarnessGuard | None = None,
 ) -> tuple[list[Any], ExternalToolsManager, list[BuildMCPClient]]:
     """Gathers and resolves all tools for the build subagent:
 
@@ -186,16 +189,21 @@ async def get_build_dev_tools(
     Returns:
         (tools_list, external_tools_manager, active_mcp_clients)
     """
-    tools: list[Any] = list(base_tools or [])
-
     # Shared guard instance for this tool-set build.
-    harness_guard = HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
+    harness_guard = guard or HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
+    tools: list[Any] = [
+        harness_guard.wrap_tool_with_guard(tool, interrupt_fn=interrupt)
+        for tool in (base_tools or [])
+    ]
 
     # 1. Base Deployment & API Tools
     if include_deploy and not any(getattr(t, "name", "") == "deploy_to_render" for t in tools):
         try:
             deploy_toolset = DeployToolset(root_dir=root_dir)
-            tools.extend(deploy_toolset.get_tools())
+            tools.extend(
+                harness_guard.wrap_tool_with_guard(tool, interrupt_fn=interrupt)
+                for tool in deploy_toolset.get_tools()
+            )
         except Exception:
             pass
 
@@ -239,24 +247,29 @@ async def get_build_dev_tools(
     # 4. Programmatic Self-Verification Tool — wired with interrupt for real HITL escalation
     if not any(getattr(t, "name", "") == "run_verification" for t in tools):
         try:
-            tools.append(create_verification_tool(root_dir=root_dir, interrupt_fn=interrupt))
+            verification_tool = create_verification_tool(root_dir=root_dir, interrupt_fn=interrupt)
+            tools.append(harness_guard.wrap_tool_with_guard(verification_tool, interrupt_fn=interrupt))
         except Exception:
             pass
 
     # 5. Ollama Nimble probabilistic decision tool.
     if not any(getattr(t, "name", "") == "probabilistic_decision" for t in tools):
-        tools.append(create_probabilistic_decision_tool())
+        tools.append(
+            harness_guard.wrap_tool_with_guard(
+                create_probabilistic_decision_tool(),
+                interrupt_fn=interrupt,
+            )
+        )
 
     # 6. LocalShellBackend Terminal & Shell Execution Tool (with HITL Guardrail Layer)
     if not any(getattr(t, "name", "") == "execute_command" for t in tools):
         # Hard failure here: if the guarded shell tool cannot be created the build
         # subagent must not run without it, as unguarded shell access would be unsafe.
-        tools.append(
-            create_shell_tool(
-                LocalShellBackend(root_dir=root_dir, timeout=900, inherit_env=True),
-                root_dir=root_dir,
-            )
-        )
+        tools.append(create_shell_tool(
+            LocalShellBackend(root_dir=root_dir, timeout=900, inherit_env=True),
+            guard=harness_guard,
+            root_dir=root_dir,
+        ))
 
     return tools, ext_mgr, clients
 
@@ -290,13 +303,16 @@ async def make_build_subagent(
     primary_llm = ChatGroq(model=model, temperature=temperature)
     fallback_llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=temperature, num_ctx=8192)
     llm = primary_llm.with_fallbacks([fallback_llm])
-    backend = LocalShellBackend(root_dir=root_dir, timeout=900, inherit_env=True)
+    guard = HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
+    raw_backend = LocalShellBackend(root_dir=root_dir, timeout=900, inherit_env=True)
+    backend = GuardedShellBackend(raw_backend, guard)
 
     tools, ext_mgr, active_mcp_clients = await get_build_dev_tools(
         base_tools=extra_tools,
         external_tools_manager=external_tools_manager,
         mcp_clients=mcp_clients,
         root_dir=root_dir,
+        guard=guard,
     )
 
     agent = create_deep_agent(
@@ -322,14 +338,15 @@ def build_dev_subagent(
     All external / MCP tools are wrapped through HarnessGuard so that
     permissions.json is enforced before any external tool call.
     """
-    tools = list(all_tools or [])
-
     # Shared guard for this subagent build.
     harness_guard = guard or HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
-    shell_backend = backend or LocalShellBackend(
-        root_dir=root_dir,
-        timeout=900,
-        inherit_env=True,
+    tools = [
+        harness_guard.wrap_tool_with_guard(tool, interrupt_fn=interrupt)
+        for tool in (all_tools or [])
+    ]
+    shell_backend = backend or GuardedShellBackend(
+        LocalShellBackend(root_dir=root_dir, timeout=900, inherit_env=True),
+        harness_guard,
     )
 
     ext_mgr = external_tools or ExternalToolsManager()
