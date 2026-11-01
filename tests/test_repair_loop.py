@@ -81,6 +81,109 @@ def test_repair_loop_stops_after_successful_first_round():
     assert result["status"] == "complete"
 
 
+def test_repair_loop_requests_start_approval_before_preparation_or_agent_work(tmp_path):
+    import json
+
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+    from agent.guardrail import HarnessGuard
+
+    agent = FakeAgent([
+        {
+            "name": "run_verification",
+            "content": "✅ Verification PASSED",
+            "answer": "Done.",
+        },
+    ])
+    permissions_path = tmp_path / "permissions.json"
+    permissions_path.write_text(
+        json.dumps({"allow": [], "ask": ["AgentRun(start)"], "deny": []}),
+        encoding="utf-8",
+    )
+    guard = HarnessGuard(
+        str(permissions_path),
+        failures_path=str(tmp_path / "failures.md"),
+    )
+    prepared = []
+
+    async def pre_run(state):
+        prepared.append(state["user_request"])
+
+    graph = build_repair_graph(
+        agent,
+        checkpointer=MemorySaver(),
+        guard=guard,
+        pre_run=pre_run,
+    )
+    config = {"configurable": {"thread_id": "start-approval"}}
+
+    async def run_and_approve():
+        paused = await graph.ainvoke(_initial_state(), config=config)
+        assert paused.get("__interrupt__")
+        assert prepared == []
+        assert agent.prompts == []
+
+        result = await graph.ainvoke(
+            Command(resume={"approved": True}),
+            config=config,
+        )
+        assert result["status"] == "complete"
+        assert prepared == ["Fix the failing tests"]
+        assert len(agent.prompts) == 1
+
+    asyncio.run(run_and_approve())
+
+
+def test_repair_loop_does_not_prepare_or_run_after_start_approval_rejected(tmp_path):
+    import json
+
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+    from agent.guardrail import HarnessGuard
+
+    agent = FakeAgent([
+        {
+            "name": "run_verification",
+            "content": "✅ Verification PASSED",
+            "answer": "Done.",
+        },
+    ])
+    permissions_path = tmp_path / "permissions.json"
+    permissions_path.write_text(
+        json.dumps({"allow": [], "ask": ["AgentRun(start)"], "deny": []}),
+        encoding="utf-8",
+    )
+    guard = HarnessGuard(
+        str(permissions_path),
+        failures_path=str(tmp_path / "failures.md"),
+    )
+    prepared = []
+
+    async def pre_run(state):
+        prepared.append(state["user_request"])
+
+    graph = build_repair_graph(
+        agent,
+        checkpointer=MemorySaver(),
+        guard=guard,
+        pre_run=pre_run,
+    )
+    config = {"configurable": {"thread_id": "start-rejected"}}
+
+    async def run_and_reject():
+        paused = await graph.ainvoke(_initial_state(), config=config)
+        assert paused.get("__interrupt__")
+        result = await graph.ainvoke(
+            Command(resume={"approved": False}),
+            config=config,
+        )
+        assert result["status"] == "blocked"
+        assert prepared == []
+        assert agent.prompts == []
+
+    asyncio.run(run_and_reject())
+
+
 def test_repair_loop_streams_tool_events_and_final_state():
     agent = FakeAgent([
         {

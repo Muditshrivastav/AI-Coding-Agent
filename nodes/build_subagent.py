@@ -146,7 +146,8 @@ FILESYSTEM PATH RULES (CRITICAL — READ FIRST):
 - Shell commands via execute_command use the host shell and DO accept normal paths/commands
 
 Tool Usage & Integration:
-- Terminal & Shell Execution: Use `execute_command` for host shell commands, package installs, and Git operations. It inherits the user's PATH/environment and runs from the workspace. Set `timeout_seconds` up to 1800 for long installs/builds; sensitive operations still follow HarnessGuard approval rules.
+- Permission requests: If the task requires a shell command or file mutation, invoke the corresponding tool instead of waiting for approval in chat or silently skipping the action. HarnessGuard intercepts it before execution and pauses the run for approval when permissions.json says 'ask'. Continue from the resumed tool result after approval. If denied, do not retry through another tool or method.
+- Terminal & Shell Execution: `terminal_run` uses a persistent workspace shell shared with the orchestrator and retains its working directory/environment across calls. Use `terminal_read` after a timeout and `terminal_close` when finished. Use `execute_command` for isolated commands. Do not tell the user shell/Git access is unavailable instead of invoking a tool. HarnessGuard checks every command before execution; set timeouts up to 1800 seconds for long installs/builds.
 - Filesystem Tools: Use `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep` with POSIX virtual paths (e.g., /agent/core.py, /nodes/build_subagent.py). Always start with ls(path="/") to explore the workspace.
 - Probabilistic Decisions (Low-token): Use the `probabilistic_decision` tool for triage and strategy decisions when encountering errors or needing structured probabilistic categorization without heavy reasoning token overhead.
 - Self-Verification: Call the `run_verification` tool ('all', 'lint', or 'test') to validate your changes. It runs linting and pytest tests, returning actionable stdout/stderr tracebacks. If verification fails, inspect the traceback, resolve the issue in code, and verify again.
@@ -302,7 +303,7 @@ async def make_build_subagent(
     """
     primary_llm = ChatGroq(model=model, temperature=temperature)
     fallback_llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=temperature, num_ctx=8192)
-    llm = primary_llm.with_fallbacks([fallback_llm])
+    llm: Any = primary_llm.with_fallbacks([fallback_llm])
     guard = HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
     raw_backend = LocalShellBackend(root_dir=root_dir, timeout=900, inherit_env=True)
     backend = GuardedShellBackend(raw_backend, guard)

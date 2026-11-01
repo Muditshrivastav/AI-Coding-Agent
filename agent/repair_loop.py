@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any, Required, TypedDict
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
 
 
 _COMMAND_FAILURE = re.compile(r"\[Command failed with exit code [1-9]\d*\]", re.IGNORECASE)
@@ -31,6 +33,7 @@ class RepairLoopState(TypedDict, total=False):
     final_output: str
     failures: list[str]
     status: str
+    start_approved: bool
 
 
 def _message_text(content: Any) -> str:
@@ -56,10 +59,31 @@ def build_repair_graph(
     *,
     checkpointer: Any = None,
     max_repair_rounds: int = 3,
+    guard: Any = None,
+    pre_run: Callable[[RepairLoopState], Awaitable[None]] | None = None,
 ) -> Any:
-    """Run the agent again with failure diagnostics, stopping at a fixed retry cap."""
+    """Require run approval, then execute with bounded failure-repair rounds."""
     if max_repair_rounds < 0:
         raise ValueError("max_repair_rounds must be non-negative")
+
+    async def request_start_approval(state: RepairLoopState) -> dict[str, Any]:
+        if guard is not None:
+            try:
+                guard.enforce(
+                    "AgentRun(start)",
+                    interrupt_fn=interrupt,
+                    description="Start the coding agent run",
+                )
+            except PermissionError as exc:
+                return {
+                    "start_approved": False,
+                    "status": "blocked",
+                    "final_output": str(exc),
+                }
+
+        if pre_run is not None:
+            await pre_run(state)
+        return {"start_approved": True}
 
     async def execute_round(
         state: RepairLoopState,
@@ -188,10 +212,17 @@ def build_repair_graph(
             return END
         return "prepare_repair"
 
+    def route_after_start(state: RepairLoopState) -> str:
+        if not state.get("start_approved", False):
+            return END
+        return "execute_round"
+
     graph = StateGraph(RepairLoopState)
+    graph.add_node("request_start_approval", request_start_approval)
     graph.add_node("execute_round", execute_round)
     graph.add_node("prepare_repair", prepare_repair)
-    graph.add_edge(START, "execute_round")
+    graph.add_edge(START, "request_start_approval")
+    graph.add_conditional_edges("request_start_approval", route_after_start)
     graph.add_conditional_edges("execute_round", route_after_round)
     graph.add_edge("prepare_repair", "execute_round")
     return graph.compile(checkpointer=checkpointer)

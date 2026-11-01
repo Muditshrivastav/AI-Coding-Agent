@@ -82,19 +82,20 @@ def make_planning_subagent(
 
     primary_llm = ChatGroq(model="qwen/qwen3.8-27b", temperature=0.2)
     fallback_llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
-    llm = primary_llm.with_fallbacks([fallback_llm])
     backend = GuardedShellBackend(FilesystemBackend(root_dir=root_dir), guard)
-    middleware = [MemoryMiddleware()]
+    middleware = [MemoryMiddleware(backend=backend, sources=["/AGENTS.md"])]
 
     tools: list[Any] = [write_plan_tool] + list(extra_tools or [])
 
-    return create_deep_agent(
-        model=llm,
-        backend=backend,
-        system_prompt=PLANNING_SYSTEM_PROMPT,
-        middleware=middleware,
-        tools=tools,
-    )
+    agent_kwargs = {
+        "backend": backend,
+        "system_prompt": PLANNING_SYSTEM_PROMPT,
+        "middleware": middleware,
+        "tools": tools,
+    }
+    primary_agent = create_deep_agent(model=primary_llm, **agent_kwargs)
+    fallback_agent = create_deep_agent(model=fallback_llm, **agent_kwargs)
+    return primary_agent.with_fallbacks([fallback_agent])
 
 
 # ---------------------------------------------------------------------------

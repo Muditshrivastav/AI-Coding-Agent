@@ -10,8 +10,9 @@ Before running any GitHub command via `LocalShellBackend`, observe the following
 
 1. **Verify Sandbox Boundary**: All commands must execute within `root_dir`.
 2. **Respect `harness/permissions.json`**:
-   - `git add`, `git commit`, `git status`, `git branch` are allowed.
-   - `git push` triggers the **HITL (Human-in-the-Loop) approval gate** (`ask` permission). Do not bypass or force push without approval.
+   - Every shell command, including `git add`, `git commit`, `git status`, and `git branch`, requires **HITL (Human-in-the-Loop) approval**.
+   - Never bypass or force an approval checkpoint; denied commands must not be retried through another tool.
+   - Do not wait for approval in chat or skip a required command. Invoke it with `execute_command`; HarnessGuard pauses the run and presents the approval request before execution. Continue only after the run resumes with the user's decision.
 3. **Sensitive Files Exclusion**:
    - Verify `.gitignore` exists and excludes `.env`, `secrets/`, `*.key`, `__pycache__/`, `.venv/`, and IDE config directories.
    - Never stage `.env` or files matching `deny` rules.
@@ -20,7 +21,7 @@ Before running any GitHub command via `LocalShellBackend`, observe the following
 
 ## 2. Step-by-Step GitHub Publish Workflow
 
-Execute these commands sequentially via `LocalShellBackend`:
+Execute these commands sequentially via `execute_command` (which runs through the guarded local shell):
 
 ### Step 1: Pre-flight Checks & Verification
 Ensure all code passes verification before any git staging:

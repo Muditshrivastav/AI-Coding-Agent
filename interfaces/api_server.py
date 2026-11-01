@@ -77,6 +77,14 @@ async def startup_event() -> None:
         # Leave harness=None so endpoints return 503 instead of crashing
 
 
+@app.on_event("shutdown")
+async def shutdown_event() -> None:
+    global harness
+    if harness is not None:
+        harness.close()
+        harness = None
+
+
 @app.get("/health")
 async def health_check() -> dict[str, Any]:
     global harness
@@ -404,15 +412,19 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
             from agent.core import normalize_model_identifier
             from frameworks.agents_md_writer import generate_agents_md
             chosen_model = normalize_model_identifier(req.model) if req.model else active_harness._model
-            await generate_agents_md(
-                user_request=req.user_request,
-                root_dir=active_harness.root_dir,
-                model=chosen_model,
-            )
-
             agent_to_invoke = active_harness.build_agent_for_model(chosen_model)
 
-            execution_graph = active_harness.create_repair_graph(agent_to_invoke)
+            async def prepare_agent_run(state: dict[str, Any]) -> None:
+                await generate_agents_md(
+                    user_request=state["user_request"],
+                    root_dir=active_harness.root_dir,
+                    model=chosen_model,
+                )
+
+            execution_graph = active_harness.create_repair_graph(
+                agent_to_invoke,
+                pre_run=prepare_agent_run,
+            )
             active_harness._execution_graphs[thread_id] = execution_graph
             result_state: dict[str, Any] = {}
             try:

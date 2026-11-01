@@ -6,8 +6,9 @@ import asyncio
 import logging
 import uuid
 from typing import Any, AsyncIterator
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 from frameworks.deepagents_backend import DeepAgentsBackend
+from frameworks.terminal_session import TerminalSessionManager
 from frameworks.langgraph_runtime import LangGraphRuntime
 from frameworks.external_tools import ExternalToolsManager
 from tools.deploy_tools import DeployToolset
@@ -145,6 +146,8 @@ class CodingAgentHarness:
         self._evaluator = HarnessEvaluator(tracer_instance=self._tracer)
 
         self._guard = HarnessGuard(f"{root_dir}/harness/permissions.json", silent_mode=True)
+        self._terminal_session = TerminalSessionManager(root_dir, self._guard)
+        self._terminal_tools = self._terminal_session.get_tools()
         self._backend = DeepAgentsBackend(
             root_dir=root_dir,
             guard=self._guard,
@@ -160,6 +163,17 @@ class CodingAgentHarness:
         self._system_prompt = (
             "You are an autonomous coding harness agent. Always follow AGENTS.md, "
             "respect permissions.json, coordinate planning -> design -> build, and verify all code.\n"
+            "When the task requires a shell command or file mutation, invoke the appropriate tool; "
+            "do not skip it or ask for approval in chat. HarnessGuard checks the action before it "
+            "runs and will pause for the user through the approval UI when the rule is 'ask'. "
+            "After approval, continue from the resumed tool result. If denied, do not retry through "
+            "another tool or method.\n"
+            "For Git, terminal, package-install, or test commands, use terminal_run directly or "
+            "delegate to the build-agent. Use terminal_run for a persistent shell session, or "
+            "execute_command for a one-off command. The persistent terminal is shared with the "
+            "build-agent and retains its "
+            "working directory and environment. Do not claim that shell or Git access is unavailable "
+            "before attempting a tool; let HarnessGuard request approval when required.\n"
             "For code changes, call run_verification after editing. If checks fail, "
             "diagnose and repair the reported issue, then verify again.\n"
             "FILESYSTEM PATH RULES: All filesystem tools (ls, read_file, write_file, edit_file) require "
@@ -169,7 +183,7 @@ class CodingAgentHarness:
         # Build tools list with safety wraps for DB-dependent tools
         try:
             self._tools = (
-                tools
+                list(tools)
                 if tools is not None
                 else [
                     *self._deploy_tools.get_tools(),
@@ -191,6 +205,12 @@ class CodingAgentHarness:
             logger.error(f"Base tools initialization failed: {e}")
             self._tools = []
 
+        existing_tool_names = {getattr(tool, "name", "") for tool in self._tools}
+        self._tools.extend(
+            tool for tool in self._terminal_tools
+            if getattr(tool, "name", "") not in existing_tool_names
+        )
+
         # Build subagents hierarchy
         subagents = [
             planning_subagent,
@@ -208,9 +228,16 @@ class CodingAgentHarness:
             model=self._model,
             subagents=subagents,
             system_prompt=self._system_prompt,
+            tools=self._get_guarded_tools(),
             checkpointer=self._runtime.checkpointer,
             state_schema=AgentState,
         )
+
+    def _get_guarded_tools(self) -> list[Any]:
+        return [
+            self._guard.wrap_tool_with_guard(tool, interrupt_fn=interrupt)
+            for tool in self._tools
+        ]
 
     @property
     def agent(self) -> Any:
@@ -255,12 +282,15 @@ class CodingAgentHarness:
         agent: Any | None = None,
         *,
         max_repair_rounds: int = 3,
+        pre_run: Any = None,
     ) -> Any:
         """Create a bounded repair controller around an agent graph."""
         return build_repair_graph(
             agent or self._agent,
             checkpointer=self._runtime.checkpointer,
             max_repair_rounds=max_repair_rounds,
+            guard=self._guard,
+            pre_run=pre_run,
         )
 
     def build_agent_for_model(self, model: str) -> Any:
@@ -284,6 +314,7 @@ class CodingAgentHarness:
             model=chosen_model,
             subagents=subagents,
             system_prompt=self._system_prompt,
+            tools=self._get_guarded_tools(),
             checkpointer=self._runtime.checkpointer,
             state_schema=AgentState,
         )
@@ -371,19 +402,20 @@ class CodingAgentHarness:
         self._sessions.update_session(thread_id, increment_messages=True, status="active")
         await self._runtime.persist_session_to_memory(thread_id)
 
-        # ── Pre-flight: auto-generate a query-specific AGENTS.md ──────────────
-        # Runs before the agent graph so all subagents (planning, design, build)
-        # receive directives tailored to this exact user request.
         chosen_model = normalize_model_identifier(model) if model else self._model
-        await generate_agents_md(
-            user_request=user_request,
-            root_dir=self._root_dir,
-            model=chosen_model,
-        )
-
         agent_to_invoke = self.build_agent_for_model(chosen_model)
 
-        execution_graph = self.create_repair_graph(agent_to_invoke)
+        async def prepare_agent_run(state: dict[str, Any]) -> None:
+            await generate_agents_md(
+                user_request=state["user_request"],
+                root_dir=self._root_dir,
+                model=chosen_model,
+            )
+
+        execution_graph = self.create_repair_graph(
+            agent_to_invoke,
+            pre_run=prepare_agent_run,
+        )
         self._execution_graphs[thread_id] = execution_graph
         try:
             result = await execution_graph.ainvoke(
@@ -453,3 +485,7 @@ class CodingAgentHarness:
         config = {"configurable": {"thread_id": thread_id}}
         async for chunk in self._agent.astream(None, config=config):
             yield chunk
+
+    def close(self) -> None:
+        """Close the persistent terminal and its child process."""
+        self._terminal_session.close()

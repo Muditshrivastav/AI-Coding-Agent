@@ -111,7 +111,12 @@ class TestCheckPermission:
         if not real_perm.exists():
             pytest.skip("harness/permissions.json not present in working directory")
         guard = HarnessGuard(str(real_perm), failures_path=str(real_fail))
-        assert guard.check_permission("Bash(ruff check .)") == "allow"
+        assert guard.check_permission("AgentRun(start)") == "ask"
+        assert guard.check_permission("Bash(ruff check .)") == "ask"
+        assert guard.check_permission("Edit(src/app.py)") == "ask"
+        assert guard.check_permission("Write(src/app.py)") == "ask"
+        assert guard.check_permission("Delete(src/app.py)") == "ask"
+        assert guard.check_permission("run_verification") == "ask"
         assert guard.check_permission("Read(.env)") == "deny"
         assert guard.check_permission("Bash(git push origin main)") == "ask"
 

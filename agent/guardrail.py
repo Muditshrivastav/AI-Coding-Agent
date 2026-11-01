@@ -24,7 +24,7 @@ import json
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable, cast
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +392,7 @@ class HarnessGuard:
                     f"Tool '{tool_name}' cannot be permission-guarded because it exposes "
                     "neither a synchronous/asynchronous function nor invoke/ainvoke."
                 )
+            async_invoke = cast(Callable[..., Awaitable[Any]], ainvoke)
 
             def invoke_sync(*args: Any, **kwargs: Any) -> Any:
                 tool_input = kwargs if kwargs else args[0] if args else {}
@@ -399,7 +400,7 @@ class HarnessGuard:
 
             async def invoke_async(*args: Any, **kwargs: Any) -> Any:
                 tool_input = kwargs if kwargs else args[0] if args else {}
-                return await ainvoke(tool_input)
+                return await async_invoke(tool_input)
 
             original_func = invoke_sync
             original_coroutine = invoke_async

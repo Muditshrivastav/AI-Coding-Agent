@@ -4,6 +4,7 @@ tests/test_build_subagent.py - Unit tests for build subagent tools and MCP integ
 
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import StructuredTool
 
 from nodes.build_subagent import (
@@ -131,7 +132,7 @@ def test_get_build_dev_tools():
     asyncio.run(_test())
 
 
-def test_execute_command_hitl_guardrail():
+def test_execute_command_hitl_guardrail(tmp_path):
     from nodes.build_subagent import create_shell_tool
     from deepagents.backends import LocalShellBackend
     from agent.guardrail import HarnessGuard
@@ -139,14 +140,19 @@ def test_execute_command_hitl_guardrail():
     mock_backend = MagicMock(spec=LocalShellBackend)
     mock_backend.execute.return_value = MagicMock(exit_code=0, output="git version 2.40.0")
 
-    guard = HarnessGuard("harness/permissions.json")
+    guard = HarnessGuard(
+        "harness/permissions.json",
+        failures_path=str(tmp_path / "failures.md"),
+    )
     tool = create_shell_tool(backend=mock_backend, guard=guard)
     run_shell = tool.func
     assert run_shell is not None
 
-    # 1. Test allowed command
-    res_allow = run_shell("git status", timeout_seconds=1200)
-    assert "succeeded" in res_allow
+    # 1. Even routine commands require approval under the current policy.
+    with patch("nodes.build_subagent.interrupt", return_value={"approved": True}) as mock_interrupt:
+        res_approved = run_shell("git status", timeout_seconds=1200)
+        mock_interrupt.assert_called_once()
+    assert "succeeded" in res_approved
     mock_backend.execute.assert_called_with("git status", timeout=1200)
 
     # 2. Test denied dangerous command
@@ -162,6 +168,58 @@ def test_execute_command_hitl_guardrail():
     with patch("nodes.build_subagent.interrupt", return_value={"approved": False}) as mock_interrupt:
         res_ask_rejected = run_shell("git push origin main")
         assert "HITL REJECTED" in res_ask_rejected
+
+
+def test_execute_command_pauses_then_runs_after_graph_approval(tmp_path):
+    import asyncio
+    import json
+    from typing import TypedDict
+    from deepagents.backends import LocalShellBackend
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import Command
+    from agent.guardrail import HarnessGuard
+    from nodes.build_subagent import create_shell_tool
+
+    class ShellState(TypedDict, total=False):
+        result: str
+
+    permissions_path = tmp_path / "permissions.json"
+    permissions_path.write_text(
+        json.dumps({"allow": [], "ask": ["Bash(git status*)"], "deny": []}),
+        encoding="utf-8",
+    )
+    backend = MagicMock(spec=LocalShellBackend)
+    backend.execute.return_value = MagicMock(exit_code=0, output="status completed")
+    guard = HarnessGuard(
+        str(permissions_path),
+        failures_path=str(tmp_path / "failures.md"),
+    )
+    tool = create_shell_tool(backend, guard=guard)
+
+    graph_builder = StateGraph(ShellState)
+    graph_builder.add_node(
+        "command",
+        lambda state: {"result": tool.invoke({"cmd": "git status"})},
+    )
+    graph_builder.add_edge(START, "command")
+    graph_builder.add_edge("command", END)
+    config: RunnableConfig = {"configurable": {"thread_id": "approval-resume-test"}}
+    graph = graph_builder.compile(checkpointer=MemorySaver())
+
+    async def run_and_approve():
+        paused = await graph.ainvoke({}, config=config)
+        assert paused.get("__interrupt__")
+        backend.execute.assert_not_called()
+
+        resumed = await graph.ainvoke(
+            Command(resume={"approved": True}),
+            config=config,
+        )
+        assert "succeeded" in resumed["result"]
+        backend.execute.assert_called_once_with("git status", timeout=900)
+
+    asyncio.run(run_and_approve())
 
 
 def test_workspace_shell_inherits_path_and_runs_from_workspace(tmp_path):
@@ -206,7 +264,7 @@ def test_real_mcp_server_integration(tmp_path):
                     server = FastMCP("RealTestServer")
 
             @server.tool()
-            def add_numbers(a: int, b: int) -> int:
+            def add_numbers(a: int, b: int):
                 '''Adds two numbers together.'''
                 return a + b
 

@@ -173,8 +173,8 @@ The harness follows a five-component model. Each component maps to concrete file
 
 `permissions.json` defines three tiers:
 
-- **allow**: routine, safe actions such as running `pytest` and `ruff`, and editing source files.
-- **ask**: actions that pause for human approval, such as `git push`, deploys and GitHub MCP write calls. These entries become interrupts on the matching Deep Agents tools.
+- **allow**: read-only workspace access and explicitly safe external tools.
+- **ask**: the agent requests approval before starting work, then separately gates shell commands, workspace edits/writes/deletes, verification runs, deploys and GitHub MCP write calls. Approve or reject each request in the HITL card.
 - **deny**: never permitted, such as reading `.env` or `secrets/**` and `rm -rf`.
 
 Hard rules in `AGENTS.md`: never edit or delete a test to make a run pass, never push or deploy without an approval checkpoint, and never add a dependency without flagging it in `PLAN.md`. Repeated mistakes escalate: fix in session, then add a line to `AGENTS.md`, then turn it into a `deny` rule or a `make verify` check.
