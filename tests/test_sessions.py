@@ -45,6 +45,22 @@ def test_session_lifecycle(tmp_path: Path):
     assert len(manager.list_sessions()) == 1
 
 
+def test_first_user_message_titles_session_and_persists_history(tmp_path: Path):
+    manager = SessionManager(root_dir=str(tmp_path))
+    session = manager.create_session("New Agent Task")
+
+    manager.save_message(session.id, sender="user", text="Add session history\nwith persistence")
+    manager.save_message(session.id, sender="agent", text="Implemented.")
+
+    updated = manager.get_session(session.id)
+    assert updated is not None
+    assert updated.title == "Add session history"
+    assert [message["text"] for message in manager.get_messages(session.id)] == [
+        "Add session history\nwith persistence",
+        "Implemented.",
+    ]
+
+
 def test_langgraph_runtime_session_integration(tmp_path: Path):
     manager = SessionManager(root_dir=str(tmp_path))
     runtime = LangGraphRuntime(session_manager=manager, root_dir=str(tmp_path))

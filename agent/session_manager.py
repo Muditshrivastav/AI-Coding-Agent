@@ -151,7 +151,21 @@ class SessionManager:
         try:
             with open(self._get_messages_path(session_id), "w", encoding="utf-8") as f:
                 json.dump(messages, f, indent=2)
-            self.update_session(session_id, increment_messages=True)
+            meta = self._sessions.get(session_id)
+            title = None
+            if (
+                sender == "user"
+                and meta is not None
+                and meta.message_count == 0
+                and meta.title in {"New Agent Task", f"Session {session_id[:8]}"}
+            ):
+                first_line = text.strip().splitlines()
+                title = first_line[0][:40] if first_line else None
+            self.update_session(
+                session_id,
+                title=title,
+                increment_messages=True,
+            )
         except Exception:
             pass
         return msg

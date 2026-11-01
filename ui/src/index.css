@@ -226,6 +226,152 @@ html, body {
   color: #f1f5f9;
 }
 
+/* ── Persistent Chat Session List ── */
+.app-content {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+}
+
+.session-sidebar {
+  width: 230px;
+  min-width: 190px;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.session-sidebar-header {
+  min-height: 42px;
+  padding: 6px 10px 6px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-main);
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.session-new-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.session-new-btn:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--border-color);
+  color: var(--text-main);
+}
+
+.session-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.session-list-empty {
+  padding: 12px 8px;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-align: center;
+}
+
+.session-list-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 54px;
+  margin-bottom: 2px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+
+.session-list-row:hover,
+.session-list-row:focus-within {
+  background: var(--bg-tertiary);
+}
+
+.session-list-row.active {
+  background: rgba(56, 189, 248, 0.08);
+  border-color: rgba(56, 189, 248, 0.2);
+}
+
+.session-entry {
+  min-width: 0;
+  flex: 1;
+  padding: 7px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-entry:hover,
+.session-entry.active {
+  color: var(--text-main);
+}
+
+.session-entry-title {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+}
+
+.session-entry-date {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.session-delete-btn {
+  width: 28px;
+  height: 28px;
+  margin-right: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0;
+}
+
+.session-list-row:hover .session-delete-btn,
+.session-delete-btn:focus-visible {
+  opacity: 1;
+}
+
+.session-delete-btn:hover {
+  color: var(--accent-rose);
+  background: rgba(244, 63, 94, 0.1);
+}
+
+.sessions-collapsed .session-sidebar {
+  display: none;
+}
+
 /* ── Slide-over Drawers (Sessions History & Workspace Tree) ── */
 .drawer-panel {
   position: absolute;
@@ -435,7 +581,8 @@ html, body {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  width: 100%;
+  min-width: 0;
+  width: auto;
   position: relative;
   overflow: hidden;
 }
@@ -1440,6 +1587,14 @@ html, body {
 
 /* Narrow panel (VS Code sidebar ~280–520px) */
 @media (max-width: 520px) {
+  .session-sidebar {
+    position: absolute;
+    z-index: 15;
+    inset: 0 auto 0 0;
+    width: min(230px, 78vw);
+    box-shadow: 12px 0 28px rgba(0, 0, 0, 0.35);
+  }
+
   .input-dock {
     padding: 8px 8px;
   }

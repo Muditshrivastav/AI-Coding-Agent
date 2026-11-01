@@ -17,7 +17,6 @@ import {
   FolderOpen,
   Cpu,
   Layers,
-  Code2,
   RefreshCw,
   ExternalLink,
   GitBranch,
@@ -396,9 +395,26 @@ function FormattedContent({ content }) {
   )
 }
 
+function formatSessionDate(value) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+
+  const elapsedDays = Math.floor((Date.now() - date.getTime()) / 86400000)
+  if (elapsedDays < 1) return 'Today'
+  if (elapsedDays < 7) return `${elapsedDays}d ago`
+  if (elapsedDays < 35) return `${Math.floor(elapsedDays / 7)}w ago`
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
 export default function App() {
   const [sessions, setSessions] = useState([])
-  const [activeSessionId, setActiveSessionId] = useState('')
+  const [activeSessionId, setActiveSessionId] = useState(() => {
+    try {
+      return localStorage.getItem('coding-agent-active-session') || ''
+    } catch {
+      return ''
+    }
+  })
   const [messages, setMessages] = useState([])
   const [prompt, setPrompt] = useState('')
   const [isRunning, setIsRunning] = useState(false)
@@ -407,13 +423,16 @@ export default function App() {
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false)
   const [selectedModel, setSelectedModel] = useState('groq:qwen/qwen3.8-27b')
   const [isOnline, setIsOnline] = useState(false)
-  const [activeDrawer, setActiveDrawer] = useState(null) // null | 'sessions' | 'workspace'
+  const [activeDrawer, setActiveDrawer] = useState(null) // null | 'workspace'
+  const [sessionSidebarOpen, setSessionSidebarOpen] = useState(false)
   // Groq rate-limit banner: null | { message, fallbacks }
   const [rateLimitBanner, setRateLimitBanner] = useState(null)
   
   const fileInputRef = useRef(null)
   const textareaRef = useRef(null)
   const chatEndRef = useRef(null)
+  const activeSessionIdRef = useRef(activeSessionId)
+  const creatingSessionRef = useRef(false)
 
   // Workspace explorer states
   const [rightPanelTab, setRightPanelTab] = useState('files') // 'files' | 'artifacts' | 'guard'
@@ -450,13 +469,20 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (activeSessionId) {
-      loadSessionState(activeSessionId)
-      const interval = setInterval(() => {
-        loadSessionState(activeSessionId)
-      }, 2000)
-      return () => clearInterval(interval)
+    activeSessionIdRef.current = activeSessionId
+    try {
+      if (activeSessionId) {
+        localStorage.setItem('coding-agent-active-session', activeSessionId)
+      } else {
+        localStorage.removeItem('coding-agent-active-session')
+      }
+    } catch {
+      // Session selection still works when storage is unavailable.
     }
+  }, [activeSessionId])
+
+  useEffect(() => {
+    if (activeSessionId) loadSessionState(activeSessionId)
   }, [activeSessionId])
 
   useEffect(() => {
@@ -488,16 +514,24 @@ export default function App() {
       if (res.ok) {
         setIsOnline(true)
         const data = await res.json()
-        setSessions(prev => {
-          if (JSON.stringify(prev.map(s => s.id)) !== JSON.stringify(data.map(s => s.id))) {
-            return data
-          }
-          return prev
-        })
-        if (data.length > 0 && !activeSessionId) {
-          setActiveSessionId(data[0].id)
-        } else if (data.length === 0 && !activeSessionId) {
-          handleCreateSession('Default Session')
+        setSessions(previous => (
+          JSON.stringify(previous) === JSON.stringify(data) ? previous : data
+        ))
+        const currentSessionId = activeSessionIdRef.current
+        if (currentSessionId && data.some(session => session.id === currentSessionId)) return
+
+        let savedSessionId = ''
+        try {
+          savedSessionId = localStorage.getItem('coding-agent-active-session') || ''
+        } catch {
+          // Fall back to the newest session when browser storage is unavailable.
+        }
+        const sessionToRestore = data.find(session => session.id === savedSessionId) || data[0]
+        if (sessionToRestore) {
+          activeSessionIdRef.current = sessionToRestore.id
+          setActiveSessionId(sessionToRestore.id)
+        } else if (!creatingSessionRef.current) {
+          handleCreateSession('New Agent Task')
         }
       }
     } catch (_) {
@@ -506,15 +540,22 @@ export default function App() {
   }
 
   const handleSelectSession = (sessionId) => {
-    if (sessionId === activeSessionId) return
+    if (sessionId === activeSessionIdRef.current) {
+      setActiveDrawer(null)
+      return
+    }
+    activeSessionIdRef.current = sessionId
     setMessages([])
     setPendingApproval(null)
     setAttachments([])
     setActiveSessionId(sessionId)
     setActiveDrawer(null)
+    setSessionSidebarOpen(false)
   }
 
   const handleCreateSession = async (title = 'New Agent Task') => {
+    if (creatingSessionRef.current) return
+    creatingSessionRef.current = true
     try {
       const res = await fetch(`${API_BASE}/sessions`, {
         method: 'POST',
@@ -527,11 +568,15 @@ export default function App() {
         setMessages([])
         setPendingApproval(null)
         setAttachments([])
+        activeSessionIdRef.current = newSession.id
         setActiveSessionId(newSession.id)
         setActiveDrawer(null)
+        setSessionSidebarOpen(false)
       }
     } catch (err) {
       console.error(err)
+    } finally {
+      creatingSessionRef.current = false
     }
   }
 
@@ -562,11 +607,15 @@ export default function App() {
 
   const loadSessionState = async (threadId) => {
     try {
-      const res = await fetch(`${API_BASE}/runs/${threadId}`)
+      const res = await fetch(`${API_BASE}/sessions/${threadId}`)
       if (res.ok) {
-        const state = await res.json()
-        if (state && state.messages && state.messages.length > 0) {
-          const mapped = state.messages.map((m, idx) => {
+        const details = await res.json()
+        if (activeSessionIdRef.current !== threadId) return
+        const rawMessages = details.messages?.length
+          ? details.messages
+          : details.state?.messages || []
+        if (rawMessages.length > 0) {
+          const mapped = rawMessages.map((m, idx) => {
             // Determine sender
             const sender = m.sender
               || (m.type === 'human' || m.role === 'user' ? 'user' : 'agent')
@@ -1073,6 +1122,7 @@ export default function App() {
     { label: '🧪 Generate Tests', prompt: 'Generate unit tests for the core modules and show how to run them.' },
     { label: '🛠️ Refactor Code', prompt: 'Recommend key refactoring improvements for code readability and modularity.' },
   ]
+  const activeSession = sessions.find(session => session.id === activeSessionId)
 
   return (
     <div className="app-container">
@@ -1129,9 +1179,11 @@ export default function App() {
               <Plus size={15} />
             </button>
             <button
-              className={`acp-icon-btn ${activeDrawer === 'sessions' ? 'active' : ''}`}
-              onClick={() => setActiveDrawer(activeDrawer === 'sessions' ? null : 'sessions')}
+              className={`acp-icon-btn ${sessionSidebarOpen ? 'active' : ''}`}
+              onClick={() => setSessionSidebarOpen(open => !open)}
               title="Chat History"
+              aria-label="Toggle chat sessions"
+              aria-expanded={sessionSidebarOpen}
             >
               <History size={14} />
             </button>
@@ -1166,47 +1218,6 @@ export default function App() {
       </header>
 
       {/* ── Slide-over Drawers (Sessions History & Workspace Files) ── */}
-      {activeDrawer === 'sessions' && (
-        <div className="drawer-panel">
-          <div className="drawer-header">
-            <div className="drawer-title">
-              <History size={14} />
-              <span>Chat Threads</span>
-            </div>
-            <button className="drawer-close-btn" onClick={() => setActiveDrawer(null)}>
-              <X size={14} />
-            </button>
-          </div>
-          <div className="drawer-content">
-            <button className="drawer-new-btn" onClick={() => handleCreateSession()}>
-              <Plus size={14} />
-              <span>New Thread</span>
-            </button>
-            <div className="drawer-list">
-              {sessions.map(s => (
-                <div
-                  key={s.id}
-                  className={`drawer-item ${activeSessionId === s.id ? 'active' : ''}`}
-                  onClick={() => handleSelectSession(s.id)}
-                >
-                  <div className="drawer-item-title">
-                    <Code2 size={13} />
-                    <span>{s.title || `Thread ${s.id.slice(0, 8)}`}</span>
-                  </div>
-                  <button
-                    className="drawer-item-del"
-                    onClick={(e) => handleDeleteSession(s.id, e)}
-                    title="Delete thread"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
       {activeDrawer === 'workspace' && (
         <div className="drawer-panel">
           <div className="drawer-header">
@@ -1243,6 +1254,55 @@ export default function App() {
         </div>
       )}
 
+      <div className={`app-content ${sessionSidebarOpen ? '' : 'sessions-collapsed'}`}>
+        <aside className="session-sidebar" aria-label="Chat sessions">
+          <div className="session-sidebar-header">
+            <span>Sessions</span>
+            <button
+              className="session-new-btn"
+              onClick={() => handleCreateSession()}
+              title="New chat session"
+              aria-label="Create new chat session"
+            >
+              <Plus size={16} />
+            </button>
+          </div>
+          <div className="session-list" role="list">
+            {sessions.length === 0 && (
+              <div className="session-list-empty">
+                {isOnline ? 'No sessions yet' : 'Connect to load sessions'}
+              </div>
+            )}
+            {sessions.map(session => (
+              <div
+                className={`session-list-row ${activeSessionId === session.id ? 'active' : ''}`}
+                key={session.id}
+                role="listitem"
+              >
+                <button
+                  className={`session-entry ${activeSessionId === session.id ? 'active' : ''}`}
+                  onClick={() => handleSelectSession(session.id)}
+                  title={session.title || `Session ${session.id.slice(0, 8)}`}
+                  aria-current={activeSessionId === session.id ? 'page' : undefined}
+                >
+                  <span className="session-entry-title">
+                    {session.title || `Session ${session.id.slice(0, 8)}`}
+                  </span>
+                  <span className="session-entry-date">{formatSessionDate(session.updated_at)}</span>
+                </button>
+                <button
+                  className="session-delete-btn"
+                  onClick={(event) => handleDeleteSession(session.id, event)}
+                  title="Delete session"
+                  aria-label={`Delete ${session.title || 'session'}`}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </aside>
+
       {/* ── Main Chat Stream ── */}
       <main className="chat-main">
         {messages.length === 0 ? (
@@ -1252,7 +1312,9 @@ export default function App() {
             </div>
             <h2 className="welcome-title">Welcome to Coding Agent</h2>
             <p className="welcome-desc">
-              Autonomous AI pair programmer right inside your VS Code.
+              {activeSession?.message_count > 0
+                ? 'This session has no saved transcript available. New conversations will be saved and reopen from the Sessions list.'
+                : 'Autonomous AI pair programmer right inside your VS Code.'}
             </p>
 
             {workspaceInfo && (
@@ -1527,6 +1589,7 @@ export default function App() {
           </form>
         </div>
       </main>
+      </div>
     </div>
   )
 }
