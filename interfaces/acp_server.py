@@ -279,38 +279,32 @@ async def main() -> None:
 
     from agent.core import CodingAgentHarness
 
-    # Initialize harness with tools=None so it automatically loads all tools:
-    # deploy tools, verification tools, API suite (Tavily, GitHub, Supabase, Render, Groq, LangSmith),
-    # and Neo4j GraphRAG tools.
-    harness = CodingAgentHarness(
-        root_dir=root_dir,
-        tools=None,
-        # Run directly on the host shell — writes code straight to the workspace.
-        sandbox_mode="local",
-    )
-    logger.info("✅ CodingAgentHarness initialized (sandbox_mode=local).")
+    harness = await CodingAgentHarness.create(root_dir=root_dir)
+    logger.info("✅ CodingAgentHarness initialized.")
     logger.info(f"   Target Directory: {root_dir}")
 
-    # Check for official agent-client-protocol / acp package first
-    acp_started = False
-    for pkg in ("agent_client_protocol", "acp"):
-        try:
-            mod = __import__(pkg)
-            if hasattr(mod, "run_agent"):
-                logger.info(f"🚀 Starting ACP server via '{pkg}' package...")
-                await mod.run_agent(harness.agent, name="coding-agent-harness")
-                acp_started = True
-                break
-        except ImportError:
-            continue
-        except Exception as exc:
-            logger.warning(f"Failed to start with {pkg}: {exc}")
+    try:
+        acp_started = False
+        for pkg in ("agent_client_protocol", "acp"):
+            try:
+                mod = __import__(pkg)
+                if hasattr(mod, "run_agent"):
+                    logger.info(f"🚀 Starting ACP server via '{pkg}' package...")
+                    await mod.run_agent(harness.agent, name="coding-agent-harness")
+                    acp_started = True
+                    break
+            except ImportError:
+                continue
+            except Exception as exc:
+                logger.warning(f"Failed to start with {pkg}: {exc}")
 
-    if not acp_started:
-        if sys.stdin.isatty():
-            await run_interactive_terminal(harness, root_dir)
-        else:
-            await run_stdio_jsonrpc(harness, root_dir)
+        if not acp_started:
+            if sys.stdin.isatty():
+                await run_interactive_terminal(harness, root_dir)
+            else:
+                await run_stdio_jsonrpc(harness, root_dir)
+    finally:
+        await harness.aclose()
 
 
 if __name__ == "__main__":

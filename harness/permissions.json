@@ -35,7 +35,7 @@
     "mcp__github__merge_pull_request",
     "mcp__github__delete_branch",
     "mcp__github__push_files",
-    "Edit(plan.md)",
+    "Edit(PLAN.md)",
     "Edit(ARCHITECTURE.md)",
     "run_verification"
   ],
@@ -51,5 +51,60 @@
     "Bash(*format c:*)",
     "Bash(*shutdown*)",
     "Bash(*reboot*)"
-  ]
+  ],
+  "profiles": {
+    "autonomous": {
+      "allow": [
+        "Read(*)",
+        "Read(**/*)",
+        "Bash(*)",
+        "Edit(*)",
+        "Edit(**/*)",
+        "Write(*)",
+        "Write(**/*)",
+        "run_verification",
+        "AgentRun(start)",
+        "ingest_github_repo",
+        "retrieve_graphrag_code",
+        "tavily_search*",
+        "tavily_web_search*",
+        "chrome-devtools*",
+        "github_list_issues",
+        "github_repo_info",
+        "github_list_commits",
+        "probabilistic_decision",
+        "execute_command",
+        "terminal_run",
+        "terminal_read",
+        "terminal_close"
+      ],
+      "ask": [
+        "Bash(git push*)",
+        "Bash(git reset --hard*)",
+        "Bash(git clean*)",
+        "Delete(*)",
+        "Delete(**/*)",
+        "vercel_deploy",
+        "render_deploy",
+        "deploy_to_render",
+        "mcp__github__create_pull_request",
+        "mcp__github__merge_pull_request",
+        "mcp__github__delete_branch",
+        "mcp__github__push_files"
+      ],
+      "deny": [
+        "Read(.env)",
+        "Read(secrets/**)",
+        "Bash(rm -rf /*)",
+        "Bash(rm -rf *)",
+        "Bash(*rm -rf*)",
+        "Bash(*:(){ :|:& };:*)",
+        "Bash(*mkfs*)",
+        "Bash(*dd if=*)",
+        "Bash(*format c:*)",
+        "Bash(*shutdown*)",
+        "Bash(*reboot*)"
+      ]
+    }
+  }
 }

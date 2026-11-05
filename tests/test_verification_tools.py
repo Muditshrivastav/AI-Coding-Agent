@@ -15,39 +15,44 @@ def test_verification_tool_initialization():
     assert "test_target" in tool.args
 
 
-def test_verification_toolset_success():
-    toolset = VerificationToolset(root_dir=".", max_attempts=3)
+def test_verification_toolset_success(tmp_path):
+    toolset = VerificationToolset(root_dir=str(tmp_path), max_attempts=3)
 
     # Mock subprocess runs to return success (rc=0)
     with patch.object(toolset, "_run_subprocess", return_value=(0, "All tests passed", "")):
         report = toolset.run_verification(tier="all")
-        assert "PASSED" in report
+        assert report["passed"] is True
+        assert report["tier"] == "all"
+        assert report["exit_code"] == 0
+        assert "PASSED" in report["report"]
         assert toolset.last_passed is True
         assert toolset.attempt_count == 0
 
 
-def test_verification_toolset_failure_and_escalation():
-    toolset = VerificationToolset(root_dir=".", max_attempts=3)
+def test_verification_toolset_failure_and_escalation(tmp_path):
+    toolset = VerificationToolset(root_dir=str(tmp_path), max_attempts=3)
 
     # Mock subprocess run to simulate a test failure
     with patch.object(toolset, "_run_subprocess", return_value=(1, "", "AssertionError: expected True, got False")):
         # Attempt 1
         rep1 = toolset.run_verification(tier="test")
-        assert "FAILED" in rep1
-        assert "AssertionError" in rep1
+        assert rep1["passed"] is False
+        assert rep1["exit_code"] == 1
+        assert "FAILED" in rep1["report"]
+        assert "AssertionError" in rep1["stderr_tail"]
         assert toolset.attempt_count == 1
-        assert "ESCALATION WARNING" not in rep1
+        assert "ESCALATION WARNING" not in rep1["report"]
 
         # Attempt 2
         rep2 = toolset.run_verification(tier="test")
         assert toolset.attempt_count == 2
-        assert "ESCALATION WARNING" not in rep2
+        assert "ESCALATION WARNING" not in rep2["report"]
 
         # Attempt 3 (hits max_attempts limit)
         rep3 = toolset.run_verification(tier="test")
         assert toolset.attempt_count == 3
-        assert "ESCALATION WARNING" in rep3
-        assert "Human-in-the-Loop" in rep3
+        assert "ESCALATION WARNING" in rep3["report"]
+        assert "Human-in-the-Loop" in rep3["report"]
 
 
 def test_verification_toolset_tier_selection():
@@ -71,12 +76,12 @@ def test_verification_toolset_failures_log(tmp_path):
 
     with patch.object(toolset, "_run_subprocess", return_value=(1, "", "SyntaxError in main.py")):
         report = toolset.run_verification(tier="lint")
-        assert "FAILED" in report
+        assert "FAILED" in report["report"]
         assert failures_file.exists()
         content = failures_file.read_text(encoding="utf-8")
         assert "verification" in content
         assert "SyntaxError in main.py" in content
-        assert "Recent Failures Log" in report
+        assert "Recent Failures Log" in report["report"]
 
 
 # ---------------------------------------------------------------------------
@@ -124,9 +129,13 @@ def test_verification_graph_success_flow():
 
 
 @pytestmark_langgraph
-def test_verification_graph_failure_and_retry_flow():
+def test_verification_graph_failure_and_retry_flow(tmp_path):
     """Verify failure path without breach: attempts incremented and no escalation."""
-    toolset = VerificationToolset(root_dir=".", max_attempts=3)
+    toolset = VerificationToolset(
+        root_dir=str(tmp_path),
+        max_attempts=3,
+        failures_path=str(tmp_path / "failures.md"),
+    )
 
     with patch.object(toolset, "_run_subprocess", return_value=(1, "", "ruff check failed")):
         graph = toolset.build_graph()
@@ -139,7 +148,7 @@ def test_verification_graph_failure_and_retry_flow():
 
 
 @pytestmark_langgraph
-def test_verification_graph_hitl_escalation():
+def test_verification_graph_hitl_escalation(tmp_path):
     """Verify that reaching max_attempts routes to hitl_escalation_node with structured payload."""
     escalation_interrupted = []
 
@@ -147,8 +156,9 @@ def test_verification_graph_hitl_escalation():
         escalation_interrupted.append(payload)
 
     toolset = VerificationToolset(
-        root_dir=".",
+        root_dir=str(tmp_path),
         max_attempts=2,
+        failures_path=str(tmp_path / "failures.md"),
         interrupt_fn=mock_interrupt,
     )
 
@@ -189,4 +199,3 @@ def test_verification_graph_tier_skipping():
         assert not mock_lint.called
         assert mock_test.called
         assert res["lint_result"]["stdout"] == "(skipped)"
-

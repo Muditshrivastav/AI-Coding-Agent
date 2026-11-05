@@ -54,18 +54,15 @@ class SessionManager:
                 for item in data:
                     meta = SessionMetadata(**item)
                     self._sessions[meta.id] = meta
-        except Exception:
-            self._sessions = {}
+        except (OSError, json.JSONDecodeError, TypeError, KeyError) as exc:
+            raise RuntimeError(f"Unable to load session registry at {self._registry_path}") from exc
 
     def _save(self) -> None:
-        try:
-            # Ensure storage directory exists before writing
-            self._storage_dir.mkdir(parents=True, exist_ok=True)
-            items = [asdict(meta) for meta in self._sessions.values()]
-            with open(self._registry_path, "w", encoding="utf-8") as f:
-                json.dump(items, f, indent=2)
-        except Exception:
-            pass
+        self._storage_dir.mkdir(parents=True, exist_ok=True)
+        items = [asdict(meta) for meta in self._sessions.values()]
+        temporary_path = self._registry_path.with_suffix(".json.tmp")
+        temporary_path.write_text(json.dumps(items, indent=2), encoding="utf-8")
+        temporary_path.replace(self._registry_path)
 
     def create_session(self, title: str | None = None, session_id: str | None = None) -> SessionMetadata:
         """Create a new chat session with a unique ID."""
@@ -89,6 +86,18 @@ class SessionManager:
     def has_session(self, session_id: str) -> bool:
         """Check if a session exists."""
         return session_id in self._sessions
+
+    def mark_running_interrupted(self) -> list[str]:
+        """Mark runs that were active during a process restart as recoverable."""
+        interrupted: list[str] = []
+        for session in self._sessions.values():
+            if session.status == "running":
+                session.status = "interrupted"
+                session.updated_at = _utc_now_iso()
+                interrupted.append(session.id)
+        if interrupted:
+            self._save()
+        return interrupted
 
     def list_sessions(self) -> list[SessionMetadata]:
         """List all sessions ordered by updated_at descending."""

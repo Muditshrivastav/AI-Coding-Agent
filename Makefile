@@ -1,9 +1,17 @@
-.PHONY: verify lint format test run-api run-ui \
+.PHONY: verify check lint format fix test run-api run-ui \
         pm2-start pm2-stop pm2-restart pm2-logs pm2-status pm2-save
 
-verify: lint test
+verify: check
+
+check: lint format test
 
 lint:
+	ruff check .
+
+format:
+	ruff format --check .
+
+fix:
 	ruff check . --fix
 	ruff format .
 

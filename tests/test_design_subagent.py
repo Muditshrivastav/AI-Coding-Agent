@@ -30,8 +30,7 @@ def test_design_subagent_can_read_and_edit_workspace_files(tmp_path, monkeypatch
         captured["backend"] = kwargs["backend"]
         return build_deep_agent(**{**kwargs, "model": model})
 
-    monkeypatch.setattr("nodes.design_subagent.ChatGroq", lambda **kwargs: model)
-    monkeypatch.setattr("nodes.design_subagent.ChatOllama", lambda **kwargs: model)
+    monkeypatch.setattr("nodes.design_subagent.create_chat_model", lambda *args, **kwargs: model)
     monkeypatch.setattr("nodes.design_subagent.create_deep_agent", create_agent)
     monkeypatch.setattr(
         "nodes.design_subagent.drawio_mcp_client", FakeDrawioClient
@@ -45,6 +44,7 @@ def test_design_subagent_can_read_and_edit_workspace_files(tmp_path, monkeypatch
 
     assert "read_file" in tools
     assert "edit_file" in tools
+    assert "write_architecture" in tools
     assert "workspace root is mounted at `/`" in captured["system_prompt"]
     assert isinstance(captured["backend"].raw_backend, FilesystemBackend)
     assert captured["backend"].read("/notes.py").file_data["content"] == "before\n"

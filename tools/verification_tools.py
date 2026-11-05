@@ -29,7 +29,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import os
-import shutil
 import subprocess
 from typing import Any, Callable
 
@@ -62,6 +61,12 @@ class VerificationArgs(BaseModel):
     test_target: str | None = Field(
         default=None,
         description="Optional specific test file or path to run (e.g. 'tests/test_build_subagent.py').",
+    )
+    timeout_seconds: int | None = Field(
+        default=None,
+        ge=1,
+        le=7200,
+        description="Optional timeout override. Defaults vary by verification tier.",
     )
 
 
@@ -127,6 +132,7 @@ class VerificationToolset:
         max_attempts: int = 3,
         failures_path: str | None = None,
         interrupt_fn: Callable[[Any], Any] | None = None,
+        timeout_defaults: dict[str, int] | None = None,
     ) -> None:
         self._root_dir = root_dir
         self._max_attempts = max_attempts
@@ -136,6 +142,12 @@ class VerificationToolset:
         # Optional LangGraph interrupt callable — when set, a real HITL checkpoint
         # is created after max_attempts consecutive failures instead of a text warning.
         self._interrupt_fn: Callable[[Any], Any] | None = interrupt_fn
+        self._timeout_defaults = timeout_defaults or {
+            "lint": 120,
+            "test": 900,
+            "build": 1800,
+            "e2e": 600,
+        }
 
     # ------------------------------------------------------------------
     # Properties
@@ -187,7 +199,13 @@ class VerificationToolset:
     # Internal subprocess helper
     # ------------------------------------------------------------------
 
-    def _run_subprocess(self, cmd: list[str]) -> tuple[int, str, str]:
+    def _run_subprocess(
+        self,
+        cmd: list[str],
+        *,
+        timeout_seconds: int | None = None,
+        tier: str = "build",
+    ) -> tuple[int, str, str]:
         """Runs a command inside root_dir, returning (returncode, stdout, stderr).
 
         Raises ``subprocess.TimeoutExpired`` and ``FileNotFoundError`` deliberately
@@ -199,7 +217,7 @@ class VerificationToolset:
             cwd=self._root_dir,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout_seconds or self._timeout_defaults[tier],
         )
         return res.returncode, res.stdout, res.stderr
 
@@ -207,7 +225,12 @@ class VerificationToolset:
     # Public stage methods  (used directly by graph nodes)
     # ------------------------------------------------------------------
 
-    def run_lint(self, path: str = ".") -> dict[str, Any]:
+    def run_lint(
+        self,
+        path: str = ".",
+        *,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
         """Run ruff static analysis and return a structured result dict.
 
         Falls back to ``python -m ruff`` if the ``ruff`` binary is not on PATH.
@@ -218,13 +241,26 @@ class VerificationToolset:
         -------
         dict with keys: ``step``, ``returncode``, ``stdout``, ``stderr``
         """
-        rc, out, err = self._run_subprocess(["ruff", "check", path])
+        rc, out, err = self._run_subprocess(
+            ["ruff", "check", path],
+            timeout_seconds=timeout_seconds,
+            tier="lint",
+        )
         if rc == 127:
             # ruff binary missing — try module invocation
-            rc, out, err = self._run_subprocess(["python", "-m", "ruff", "check", path])
+            rc, out, err = self._run_subprocess(
+                ["python", "-m", "ruff", "check", path],
+                timeout_seconds=timeout_seconds,
+                tier="lint",
+            )
         return {"step": "ruff check", "returncode": rc, "stdout": out, "stderr": err}
 
-    def run_tests(self, test_target: str | None = None) -> dict[str, Any]:
+    def run_tests(
+        self,
+        test_target: str | None = None,
+        *,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
         """Run pytest and return a structured result dict.
 
         Falls back to ``python -m pytest`` if the ``pytest`` binary is not on PATH.
@@ -238,10 +274,18 @@ class VerificationToolset:
         cmd = ["pytest", "-q"]
         if test_target:
             cmd.append(test_target)
-        rc, out, err = self._run_subprocess(cmd)
+        rc, out, err = self._run_subprocess(
+            cmd,
+            timeout_seconds=timeout_seconds,
+            tier="test",
+        )
         if rc == 127:
             cmd[0:1] = ["python", "-m", "pytest"]
-            rc, out, err = self._run_subprocess(cmd)
+            rc, out, err = self._run_subprocess(
+                cmd,
+                timeout_seconds=timeout_seconds,
+                tier="test",
+            )
         return {"step": "pytest", "returncode": rc, "stdout": out, "stderr": err}
 
     # ------------------------------------------------------------------
@@ -291,29 +335,27 @@ class VerificationToolset:
     # Flat StructuredTool interface (backward compatible)
     # ------------------------------------------------------------------
 
-    def run_verification(self, tier: str = "all", test_target: str | None = None) -> str:
-        """Executes verification checks and formats actionable diagnostics for repair loops."""
+    def run_verification(
+        self,
+        tier: str = "all",
+        test_target: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        """Run a verification tier and return machine-readable status and diagnostics."""
         self._attempt_count += 1
         tier = (tier or "all").lower()
+        if tier not in {"all", "lint", "test"}:
+            raise ValueError("tier must be one of: all, lint, test.")
 
         results: list[dict[str, Any]] = []
-        has_make = shutil.which("make") is not None
 
-        # Execute based on tier
         if tier in ("all", "lint"):
-            if has_make and tier == "all" and not test_target:
-                try:
-                    rc, out, err = self._run_subprocess(["make", "verify"])
-                except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-                    rc, out, err = 1, "", str(exc)
-                results.append({"step": "make verify", "returncode": rc, "stdout": out, "stderr": err})
-            else:
-                results.append(self.run_lint())
+            results.append(self.run_lint(timeout_seconds=timeout_seconds))
 
         if tier in ("all", "test"):
-            # Skip if make verify already ran both and succeeded
-            if not (has_make and tier == "all" and not test_target and results and results[0]["returncode"] == 0):
-                results.append(self.run_tests(test_target))
+            results.append(
+                self.run_tests(test_target, timeout_seconds=timeout_seconds)
+            )
 
         all_passed = len(results) > 0 and all(r["returncode"] == 0 for r in results)
         self._last_passed = all_passed
@@ -321,10 +363,17 @@ class VerificationToolset:
         if all_passed:
             current_attempt = self._attempt_count
             self._attempt_count = 0  # reset count on clean pass
-            return (
+            report = (
                 f"✅ Verification PASSED (tier: {tier}, attempt: {current_attempt}).\n"
                 "All checks and tests succeeded without errors."
             )
+            return {
+                "passed": True,
+                "tier": tier,
+                "exit_code": 0,
+                "stderr_tail": "",
+                "report": report,
+            }
 
         # Build detailed diagnostic report
         failure_blocks: list[str] = []
@@ -377,7 +426,18 @@ class VerificationToolset:
             f"{history_note}"
             f"{escalation_note}"
         )
-        return report
+        failures = [item for item in results if item["returncode"] != 0]
+        stderr_tail = "\n".join(
+            (item["stderr"].strip() or item["stdout"].strip())[-4000:]
+            for item in failures
+        )[-4000:]
+        return {
+            "passed": False,
+            "tier": tier,
+            "exit_code": failures[0]["returncode"],
+            "stderr_tail": stderr_tail,
+            "report": report,
+        }
 
     def get_tools(self) -> list[StructuredTool]:
         return [
@@ -385,9 +445,10 @@ class VerificationToolset:
                 func=self.run_verification,
                 name="run_verification",
                 description=(
-                    "Executes the self-verification loop ('make verify', ruff linting, and pytest suite) and logs triage records to harness/failures.md. "
+                    "Executes ruff linting and pytest checks and logs triage records to harness/failures.md. "
                     "Returns detailed stdout/stderr tracebacks on failure for iterative code repair. "
-                    "Optionally specify tier ('all', 'lint', 'test') or a specific test_target."
+                    "Returns structured passed/tier/exit_code/stderr_tail fields. "
+                    "Optionally specify tier ('all', 'lint', 'test'), test_target, or timeout_seconds."
                 ),
                 args_schema=VerificationArgs,
             )
@@ -593,8 +654,8 @@ class VerificationToolset:
         graph: StateGraph = StateGraph(VerificationGraphState)
 
         # ── Register nodes ────────────────────────────────────────────────
-        graph.add_node("lint_node",           self._node_lint,           retry=_retry)
-        graph.add_node("test_node",           self._node_test,           retry=_retry)
+        graph.add_node("lint_node", self._node_lint, retry_policy=_retry)
+        graph.add_node("test_node", self._node_test, retry_policy=_retry)
         graph.add_node("aggregate_node",      self._node_aggregate)
         graph.add_node("pass_node",           self._node_pass)
         graph.add_node("hitl_escalation_node", self._node_hitl_escalation)

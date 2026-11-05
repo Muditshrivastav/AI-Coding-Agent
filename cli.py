@@ -29,16 +29,18 @@ async def async_main() -> None:
     root_dir = args.root_dir or resolve_workspace_root()
     print(f"🗂️  Workspace root: {root_dir}")
 
-    harness = CodingAgentHarness(root_dir=root_dir)
+    harness = await CodingAgentHarness.create(root_dir=root_dir)
+    try:
+        if args.resume:
+            print(f"Resuming thread {thread_id} (Approved={args.approve})...")
+            res = await harness.resume(thread_id, approved=args.approve)
+        else:
+            print(f"Starting execution for thread {thread_id}...")
+            res = await harness.run(args.prompt, thread_id=thread_id)
 
-    if args.resume:
-        print(f"Resuming thread {thread_id} (Approved={args.approve})...")
-        res = await harness.resume(thread_id, approved=args.approve)
-    else:
-        print(f"Starting execution for thread {thread_id}...")
-        res = await harness.run(args.prompt, thread_id=thread_id)
-
-    print("Result:", res)
+        print("Result:", res)
+    finally:
+        await harness.aclose()
 
 
 def main() -> None:
@@ -47,4 +49,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

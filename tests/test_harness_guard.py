@@ -104,13 +104,12 @@ class TestCheckPermission:
         guard, _, _ = _make_guard(tmp_path)
         assert guard.check_permission("Bash(   rm  -rf  /)") == "deny"
 
-    def test_uses_actual_permissions_json(self):
+    def test_uses_actual_permissions_json(self, tmp_path):
         """Smoke-test against the real harness/permissions.json if it exists."""
         real_perm = Path("harness/permissions.json")
-        real_fail = Path("harness/failures.md")
         if not real_perm.exists():
             pytest.skip("harness/permissions.json not present in working directory")
-        guard = HarnessGuard(str(real_perm), failures_path=str(real_fail))
+        guard = HarnessGuard(str(real_perm), failures_path=str(tmp_path / "failures.md"))
         assert guard.check_permission("AgentRun(start)") == "ask"
         assert guard.check_permission("Bash(ruff check .)") == "ask"
         assert guard.check_permission("Edit(src/app.py)") == "ask"
@@ -119,6 +118,82 @@ class TestCheckPermission:
         assert guard.check_permission("run_verification") == "ask"
         assert guard.check_permission("Read(.env)") == "deny"
         assert guard.check_permission("Bash(git push origin main)") == "ask"
+
+    def test_autonomous_profile_allows_normal_work_and_asks_for_irreversible_actions(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("SANDBOX_MODE", "docker")
+        permission_file = _make_permissions(
+            tmp_path,
+            {
+                "allow": [],
+                "ask": ["Bash(*)", "Edit(*)"],
+                "deny": ["Bash(*rm -rf*)"],
+                "profiles": {
+                    "autonomous": {
+                        "allow": ["Bash(*)", "Edit(*)", "run_verification"],
+                        "ask": ["Bash(git push*)", "Delete(*)"],
+                        "deny": ["Bash(*rm -rf*)"],
+                    }
+                },
+            },
+        )
+        guard = HarnessGuard(
+            str(permission_file),
+            failures_path=str(tmp_path / "failures.md"),
+            permission_profile="autonomous",
+        )
+
+        assert guard.check_permission("Bash(pytest -q)") == "allow"
+        assert guard.check_permission("Edit(src/app.py)") == "allow"
+        assert guard.check_permission("run_verification") == "allow"
+        assert guard.check_permission("Bash(git push origin main)") == "ask"
+        assert guard.check_permission("Delete(src/app.py)") == "ask"
+        assert guard.check_permission("Bash(rm -rf /tmp)") == "deny"
+
+    def test_autonomous_profile_falls_back_to_strict_on_local_sandbox(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        monkeypatch.setenv("SANDBOX_MODE", "local")
+        permission_file = _make_permissions(
+            tmp_path,
+            {
+                "allow": [],
+                "ask": ["Bash(*)"],
+                "deny": [],
+                "profiles": {
+                    "autonomous": {
+                        "allow": ["Bash(*)"],
+                        "ask": [],
+                        "deny": [],
+                    }
+                },
+            },
+        )
+        guard = HarnessGuard(
+            str(permission_file),
+            failures_path=str(tmp_path / "failures.md"),
+            permission_profile="autonomous",
+        )
+
+        assert guard.check_permission("Bash(pytest -q)") == "ask"
+        assert "falling back to strict" in caplog.text
+
+
+def test_remembered_approval_is_cached_per_thread_and_signature(tmp_path):
+    guard, _, _ = _make_guard(tmp_path)
+    calls = []
+
+    def approve(request):
+        calls.append(request)
+        return {"approved": True, "remember": True}
+
+    guard.enforce("Bash(git push origin main)", approve, thread_id="thread-a")
+    guard.enforce("Bash(git push origin main)", approve, thread_id="thread-a")
+    guard.enforce("Bash(git push origin main)", approve, thread_id="thread-b")
+    guard.enforce("Bash(git push origin other)", approve, thread_id="thread-a")
+
+    assert len(calls) == 3
 
 
 # ===========================================================================
@@ -431,7 +506,7 @@ class TestGuardedFilesystemBackend:
 
         rules = {
             "allow": ["Edit(*)"],
-            "ask": ["Edit(plan.md)"],
+            "ask": ["Edit(PLAN.md)"],
             "deny": [],
         }
         guard, _, _ = _make_guard(tmp_path, rules)
@@ -443,7 +518,7 @@ class TestGuardedFilesystemBackend:
             return {"approved": True}
 
         with patch("langgraph.types.interrupt", side_effect=approve):
-            backend.write("/plan.md", "approved plan")
+            backend.write("/PLAN.md", "approved plan")
 
-        assert captured["signature"] == "Edit(plan.md)"
-        assert (tmp_path / "plan.md").read_text(encoding="utf-8") == "approved plan"
+        assert captured["signature"] == "Edit(PLAN.md)"
+        assert (tmp_path / "PLAN.md").read_text(encoding="utf-8") == "approved plan"

@@ -103,29 +103,18 @@ def test_terminal_read_collects_timed_out_command(tmp_path):
         manager.close()
 
 
-def test_root_model_build_exposes_guarded_terminal_tools(tmp_path, monkeypatch):
-    guard = _guard(
-        tmp_path,
-        allow=["terminal_run", "terminal_read", "terminal_close"],
-        ask=["Bash(*)"],
-    )
-    terminal_tools = TerminalSessionManager(str(tmp_path), guard).get_tools()
+def test_root_model_does_not_expose_host_terminal_tools(tmp_path, monkeypatch):
+    guard = _guard(tmp_path)
     captured = {}
-    approval_requests = []
-
-    def approve(request):
-        approval_requests.append(request)
-        return {"approved": True}
-
-    monkeypatch.setattr("frameworks.terminal_session.interrupt", approve)
 
     harness = CodingAgentHarness.__new__(CodingAgentHarness)
     setattr(harness, "_model", "ollama:default")
-    setattr(harness, "_tools", terminal_tools)
+    setattr(harness, "_tools", [])
     setattr(harness, "_guard", guard)
     setattr(harness, "_external_tools", object())
     setattr(harness, "_root_dir", str(tmp_path))
     setattr(harness, "_system_prompt", "")
+    setattr(harness, "_subagents", [])
     setattr(harness, "_backend", SimpleNamespace(
         backend=object(),
         build_agent=lambda **kwargs: captured.update(kwargs) or kwargs,
@@ -136,14 +125,4 @@ def test_root_model_build_exposes_guarded_terminal_tools(tmp_path, monkeypatch):
     harness.build_agent_for_model("ollama:alternate")
 
     root_tool_names = {tool.name for tool in captured["tools"]}
-    assert {"terminal_run", "terminal_read", "terminal_close"} <= root_tool_names
-    assert all(tool.description.startswith("[HITL-guarded]") for tool in captured["tools"])
-    run_tool = next(tool for tool in captured["tools"] if tool.name == "terminal_run")
-    close_tool = next(tool for tool in captured["tools"] if tool.name == "terminal_close")
-    try:
-        result = run_tool.invoke({"command": "echo root-tool"})
-
-        assert "succeeded" in result
-        assert approval_requests[0]["signature"] == "Bash(echo root-tool)"
-    finally:
-        close_tool.invoke({})
+    assert not {"terminal_run", "terminal_read", "terminal_close"} & root_tool_names

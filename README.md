@@ -1,8 +1,8 @@
 # AI Coding Agent
 
-An autonomous coding agent built as an **execution harness**, not a chat assistant. Given a software task, it plans the work, designs the architecture, implements it, verifies it with lint/tests/E2E checks, and commits, pushes and deploys, with a human approval gate before anything irreversible.
+An AI coding agent built as an **execution harness**, not a chat assistant. It plans a request into independently verifiable tasks, executes them one at a time, and continues past blocked tasks. It can expose Git, MCP, and deployment tools; irreversible actions remain permission-gated and are not an automatic completion step.
 
-It is built on **LangGraph + Deep Agents**, talks to external services through **MCP**, retrieves context from your codebase with **GraphRAG (Neo4j)**, and runs shell commands in a **Docker sandbox**.
+It is built on **LangGraph + Deep Agents**, loads optional external services through **MCP**, retrieves context from your codebase with **GraphRAG (Neo4j)**, and runs shell commands in the configured sandbox. `SANDBOX_MODE=auto` prefers Docker and falls back to the local workspace shell when Docker is unavailable.
 
 > **Why "harness"?** The model is only one part. The harness is everything around it: instruction files, tools, verification scripts, permission rules, memory and logs. This project is organised around that idea (see [Harness architecture](#harness-architecture)).
 
@@ -21,21 +21,19 @@ It is built on **LangGraph + Deep Agents**, talks to external services through *
 9. [Usage](#usage)
 10. [Configuration](#configuration)
 11. [Further documentation](#further-documentation)
-12. [Open items](#open-items)
+12. [Known limitations](#known-limitations)
 
 ---
 
 ## Features
 
-- **Three-stage multi-agent pipeline**: a planning subagent writes `PLAN.md`, a design subagent writes `ARCHITECTURE.md`, and a build subagent implements, verifies, commits and deploys.
-- **Single shared LangGraph state** across all three stages, with checkpointing so an interrupted run resumes where it stopped.
-- **MCP tool access** to GitHub, Vercel, Render and Chrome DevTools via the official MCP Python SDK.
-- **Automated verification loop**: lint, format, unit tests, then end-to-end checks in a real browser. Failures feed the actual error text into the next attempt.
-- **Whole-agent repair loop**: a top-level LangGraph controller wraps the planning/design/build agent graph, streams its tool activity, and re-enters the full graph with failure diagnostics for up to three repair rounds. Human-approval interrupts remain resumable.
-- **Human-in-the-loop approval** before file writes, `git push` and deploys, configured through `permissions.json`.
-- **GraphRAG retrieval** over your repository (AST-based chunking, Neo4j graph and vectors, cross-encoder reranking), with RAGAS faithfulness scoring to catch ungrounded code.
-- **Docker sandbox** for shell execution, so commands never touch your real repository directly.
-- **Token-saving design**: TOON serialization for state and tool payloads.
+- **Structured task execution**: a planning agent writes `PLAN.md` and `harness/tasks.json`; the loop verifies each task's `verify_command`, retries/replans failures, and continues after blocked tasks.
+- **Checkpointed runs**: a Postgres DSN enables LangGraph's async Postgres checkpointer and restart recovery; without a DSN, checkpoints are in-memory.
+- **Optional MCP tools**: GitHub requires a configured token; Chrome DevTools, WebMCP, draw.io, and Render are loaded when available/configured. Failed servers are logged and isolated; `/tools` reports loaded names and status.
+- **Command-based verification**: each task's verification command runs independently, and failing output is fed into retries. Browser E2E verification is not currently wired into the task loop.
+- **Human-in-the-loop permissions**: `strict` remains the default. The `autonomous` profile allows routine work and still asks before irreversible actions.
+- **Optional GraphRAG retrieval** over the repository when Neo4j is configured; RAGAS utilities are not run as part of each task.
+- **Sandbox modes**: `auto` (default; Docker with local fallback), `docker` (require Docker), or `local` (host shell).
 - **Multiple interfaces**: a VS Code extension, a browser UI, a CLI, and a FastAPI backend.
 - **Observability**: LangSmith traces plus `progress.md` and `failures.md` logs.
 
@@ -45,28 +43,30 @@ It is built on **LangGraph + Deep Agents**, talks to external services through *
 
 | Layer | Technology | Role |
 |---|---|---|
-| Agent framework | **Deep Agents** (`deepagents`) | `create_deep_agent`, subagents, filesystem and shell backends, todo middleware |
+| Agent framework | **Deep Agents** (`deepagents`) | `create_deep_agent`, runnable subagents, filesystem and shell backends |
 | Orchestration | **LangGraph**, **LangChain** | State graph, checkpointing, interrupts (HITL), retries |
 | Tool protocol | **MCP** (official Python SDK, `mcp`) | `ClientSession`, `stdio_client`, `streamablehttp_client`; tools converted to LangChain `StructuredTool`s |
-| Source control | **GitHub MCP** | Branch, commit, push, pull request operations |
-| Deployment | **Vercel MCP**, **Render MCP** | Read-only status and logs. Deploy triggers go through the CLI as shell tools |
-| Browser / E2E | **Chrome DevTools MCP** | Runs and tests the built frontend in a real browser |
+| Source control | **GitHub MCP** | Loaded when a GitHub token is configured; available operations depend on the remote server |
+| Deployment | **Render MCP** | Optional and enabled when configured |
+| Browser tooling | **Chrome DevTools MCP**, WebMCP | Optional tools for browser inspection; not used as automated task verification |
 | Web search | **Tavily** (`langchain-tavily`, `tavily-python`) | Looks up current docs and APIs |
 | Code retrieval | **Neo4j** + `neo4j-graphrag` | Graph of files, functions and classes with vector embeddings |
 | Repo ingestion | **LlamaIndex** (`llama-index-readers-github`) | Reads repo files through the GitHub API for ingestion |
 | Embeddings and reranking | `sentence-transformers`, `langchain-huggingface` | Embeddings and a cross-encoder reranker |
-| Retrieval evaluation | **RAGAS** | Faithfulness scoring of generated output against retrieved context |
-| Observability | **LangSmith** | Traces every tool call, subagent delegation and retrieval step |
+| Retrieval evaluation | **RAGAS** | Evaluation utilities; not part of per-task verification |
+| Observability | **LangSmith** | Optional tracing when configured |
 | LLM providers | `langchain-groq`, `langchain-ollama`, `langchain-huggingface` | Pluggable model backends via LangChain |
-| Cross-session memory | **Supabase** (Postgres via `asyncpg`) | Persistent memory beyond a single LangGraph thread |
-| Sandbox | **Docker** (`docker` SDK) | Isolated shell execution with a bind-mounted workspace |
+| Persistence | **Postgres** (`langgraph-checkpoint-postgres`) | Durable LangGraph checkpoints when a Supabase/Postgres DSN is configured |
+| Cross-session memory | **Supabase** (Postgres via `asyncpg`) | Optional session memory and metadata |
+| Sandbox | **Docker** (`docker` SDK) | Isolated command execution when available; `auto` falls back to the local shell |
 | API layer | **FastAPI** | HTTP and SSE surface over the harness |
 | Editor integration | **VS Code extension** + **ACP** (`agent-client-protocol`) | Runs the agent inside VS Code through the extension, which talks to the ACP server |
 | Browser UI | Web UI (`ui/`) | Use the agent from the browser, on top of the FastAPI backend |
-| Serialization | **TOON** (`toon`) | Compact encoding to cut token usage |
 | Testing and tooling | `pytest`, `ruff`, `uv` | Verification and dependency management |
 
 Requires **Python 3.12+**.
+
+Small or latency-optimized models may struggle with long, multi-step tool use. The planner and builder have separate model settings so you can choose a stronger model for task execution.
 
 ---
 
@@ -79,58 +79,48 @@ User request
 +---------------------------------------------------------------+
 |  CodingAgentHarness  (run / resume, thread-scoped)            |
 |                                                               |
-|  1. Planning subagent  ->  PLAN.md                            |
-|  2. Design subagent    ->  ARCHITECTURE.md                    |
-|  3. Build subagent     ->  code, commits, deploy              |
+|  1. Plan request       ->  PLAN.md + harness/tasks.json        |
+|  2. Execute one task   ->  verify, retry/replan or block       |
+|  3. Continue tasks     ->  final status + progress.md          |
 +---------------------------------------------------------------+
 ```
 
-### The build loop
+### The task loop
 
-The build subagent works one todo at a time:
+Each task gets a fresh agent invocation and an independent verification command:
 
 ```
-Orientation: read AGENTS.md, PLAN.md, ARCHITECTURE.md, progress.md, git status
-        |
-        v
-Decompose into todos (write_todos)
-        |
-   +--> Retrieve context (codebase GraphRAG + external docs)
-   |         |
-   |         v
-   |    Generate code for this todo (writes are staged for approval)
-   |         |
-   |         v
-   |    make verify (lint, format, tests)
-   |         |  pass                      | fail
-   |         v                            v
-   |    Commit, mark todo done      Feed the error text back, retry
-   |         |                      (capped at 2-3 attempts, then escalate to a human)
-   +--- more todos? --- yes
-        | no
-        v
-End-to-end check via Chrome DevTools MCP
-        |
-        v
-Feature complete
+plan -> pick task -> implement -> verify_command
+                             | pass       | fail
+                             v            v
+                         mark done    retry -> replan -> block
+                             |                         |
+                             +---- next task <---------+
+                                       |
+                                       v
+                               final verification
 ```
 
-### Shared state
+The default is four attempts per task. Run-level iteration, wall-clock, and token limits are configurable with `AGENT_MAX_TASK_ATTEMPTS`, `AGENT_MAX_ITERATIONS`, `AGENT_MAX_WALL_CLOCK_MINUTES`, and `AGENT_MAX_TOKENS`. The final status is `complete`, `partial`, or `budget_exceeded`; blocked tasks are listed in the result. Browser E2E is not currently part of this loop.
 
-All three stages operate on one LangGraph `AgentState`: the user request, `plan_md`, `architecture_md`, retrieved context, staged files pending approval, todos, verification attempts and result, messages, and the current stage (`planning`, `design`, `build`, `verify`, `done`).
+The outer LangGraph state and task list are checkpointed. Task attempts use separate thread IDs, and `harness/progress.md` plus `harness/tasks.json` are updated as the loop advances.
 
 ### Entry points
 
-`CodingAgentHarness` exposes exactly two entry points, both scoped to a `thread_id`:
+Initialize the harness asynchronously so it can configure the checkpointer and optional MCP clients:
 
-- `run(user_request, thread_id)` starts the bounded whole-agent repair loop. It returns either a final result or an `awaiting_approval` status when a human decision is needed.
-- `resume(thread_id, approved)` continues a paused run from its checkpoint.
+```python
+harness = await CodingAgentHarness.create(root_dir=".")
+```
 
-Because both are thread-scoped, a crashed or interrupted build resumes where it stopped instead of restarting planning, design and build.
+- `run(user_request, thread_id)` starts a task run.
+- `resume(thread_id, approved=None)` continues a checkpointed run; pass an approval decision when the checkpoint is waiting for one.
+- `POST /runs` returns `{thread_id, status: "running"}` immediately. `GET /runs/{thread_id}` returns status and progress.
+- `GET /tools` and `/health` expose MCP status and the tool names that actually loaded.
 
-### Todo mechanism
+When a Postgres DSN is configured (`supabase_uri`, `SUPABASE_URI`, `DATABASE_URL`, or `SUPABASE_DB_URL`), runs use `AsyncPostgresSaver`; without one, graph checkpoints are in-memory and do not survive restart. Session metadata is stored under `harness/sessions/`.
 
-The build subagent keeps a self-maintained task list with a single `write_todos` tool that replaces the whole list on each call. Middleware re-injects the current list into every model turn, so the objective stays in recent context. Rules: only one todo is `in_progress` at a time, todos are marked done immediately, and completion is gated on verification results rather than the model's own judgement. Details are in `TODO_MECHANISM_SPEC.md`.
+The planner, designer, and builder are registered as compiled runnable subagents with their required tools. See `TODO_MECHANISM_SPEC.md` for the actual task schema and transitions.
 
 ---
 
@@ -140,11 +130,11 @@ The harness follows a five-component model. Each component maps to concrete file
 
 | # | Component | What it looks like here |
 |---|---|---|
-| 1 | **System of record** | `harness/AGENTS.md` (root instruction file), `PLAN.md`, `ARCHITECTURE.md`, the `skills/` directory, and an `AGENT.md` memory section. Subagents read these before acting instead of re-deriving scope. |
-| 2 | **Tools** | Deep Agents filesystem and shell backend, GitHub MCP, Vercel/Render MCP, Tavily, Chrome DevTools MCP, a custom API toolset, and codebase/docs retrievers. |
-| 3 | **Feedback and verification** | `make verify` (lint, format, test), Chrome DevTools MCP for E2E, RAGAS for retrieval faithfulness. |
-| 4 | **Guardrails and permissions** | `harness/permissions.json` with `allow` / `ask` / `deny` rules, a HITL approval gate, and sandboxing of all execution. |
-| 5 | **Observability and memory** | LangSmith traces, `progress.md`, `failures.md`, `write_todos` state, and Supabase for cross-session memory. |
+| 1 | **System of record** | Permanent `harness/AGENTS.md`, per-request `harness/TASK.md`, `PLAN.md`, `ARCHITECTURE.md`, and `harness/tasks.json`. |
+| 2 | **Tools** | Deep Agents filesystem and sandbox shell, plus configured MCP, API, deployment, and repository retrieval tools. |
+| 3 | **Feedback and verification** | `make check` (lint, format check, tests) and each task's `verify_command`; no automated browser E2E tier is wired. |
+| 4 | **Guardrails and permissions** | `harness/permissions.json` with `strict` and `autonomous` profiles, guarded interrupts, and configurable shell sandbox mode. |
+| 5 | **Observability and memory** | LangSmith traces, `harness/progress.md`, `harness/failures.md`, sessions, and optional Postgres memory/checkpoints. |
 
 ### Layered view
 
@@ -164,32 +154,28 @@ The harness follows a five-component model. Each component maps to concrete file
               |                       |
               v                       v
       Guardrails                 External services
-      permissions.json           GitHub, Vercel, Render, Chrome DevTools,
+      permissions.json           GitHub, Render, Chrome DevTools,
       HITL approvals             Tavily, Neo4j, Supabase, LangSmith
-      Docker sandbox
+      configured command sandbox (Docker/local)
 ```
 
 ### Guardrails in detail
 
-`permissions.json` defines three tiers:
+`permissions.json` defines `strict` and `autonomous` profiles, each with `allow`, `ask`, and `deny` rules:
 
-- **allow**: read-only workspace access and explicitly safe external tools.
-- **ask**: the agent requests approval before starting work, then separately gates shell commands, workspace edits/writes/deletes, verification runs, deploys and GitHub MCP write calls. Approve or reject each request in the HITL card.
-- **deny**: never permitted, such as reading `.env` or `secrets/**` and `rm -rf`.
+- **strict** (default): conservative approvals for shell and write actions.
+- **autonomous**: routine shell, write, and verification actions are allowed; irreversible commands and deletes still ask. This profile is accepted only with `SANDBOX_MODE=docker` or `auto`; local mode falls back to strict.
+- **deny rules**: never permitted, such as reading `.env` or `secrets/**` and `rm -rf`.
 
-Hard rules in `AGENTS.md`: never edit or delete a test to make a run pass, never push or deploy without an approval checkpoint, and never add a dependency without flagging it in `PLAN.md`. Repeated mistakes escalate: fix in session, then add a line to `AGENTS.md`, then turn it into a `deny` rule or a `make verify` check.
+Permanent harness rules require tests to remain intact and prohibit pushing or deploying without explicit approval.
 
-### Verification tiers
+### Verification
 
-1. **Static**: lint and format after every edit.
-2. **Unit and integration**: `pytest` before every commit.
-3. **End to end**: Chrome DevTools MCP drives the built app, required before a feature is declared done.
+`make check` runs read-only lint, format checks, and tests. The task loop runs each task's configured command and checks its exit status independently. Chrome DevTools MCP is available for browser inspection when it loads, but automated E2E verification is not implemented.
 
 On failure, the real stderr or traceback goes into the next generation call. There are no blind retries.
 
-### Design rule: one framework per file
-
-Each file under `frameworks/` wraps exactly one external framework or API behind a class. Nothing outside `frameworks/` imports a raw framework directly. This keeps the code OOP-style and makes any integration swappable.
+Framework integrations generally live under `frameworks/`; existing direct integrations elsewhere are documented and tested at their call sites.
 
 ---
 
@@ -218,15 +204,7 @@ Retrieval quality lowers how often bad code is generated, while verification cat
 
 ## Sandbox execution lifecycle
 
-For hosted, multi-tenant use, the sandbox never touches the user's real repository. It works on a disposable copy:
-
-1. **Clone** the repo into an ephemeral directory with a short-lived credential.
-2. **Execute** inside a Docker container that bind-mounts only that clone.
-3. **Verify** with lint, tests and build inside the sandbox.
-4. **Push** only if verification passed, using a fresh credential held by the orchestrator, never by the container.
-5. **Cleanup** by deleting the clone.
-
-Container restrictions include a writable mount only for the run directory, a network allowlist (package registries, not GitHub), CPU and memory limits, dropped Linux capabilities, and an ephemeral container per command. After any run the real repository is either unchanged or updated with a verified change, with no partial state in between. Full details in `SANDBOX_EXECUTION_LIFECYCLE.md`.
+The current Docker backend runs commands in a container with the workspace mounted, so file changes persist in that workspace. It does not create an ephemeral clone or implement the network/resource restrictions described in the original sandbox proposal. `SANDBOX_MODE=auto` falls back to a host-local shell if Docker is unavailable; set `SANDBOX_MODE=docker` to require Docker. Do not treat the sandbox as a security boundary for untrusted workloads.
 
 ---
 
@@ -235,12 +213,12 @@ Container restrictions include a writable mount only for the run directory, a ne
 ```
 agent/          Orchestrator: CodingAgentHarness, shared state
 frameworks/     One wrapper class per external framework (LangGraph, Deep Agents,
-                MCP client, GitHub/Vercel/Render/Chrome DevTools MCP, Tavily,
+                MCP client, GitHub/Render/Chrome DevTools MCP, Tavily,
                 LangSmith, RAGAS, Supabase, Docker sandbox, VS Code workspace)
 nodes/          Planning, design and build subagents
 tools/          API toolset, deploy toolset, codebase and docs retrievers
 graphrag/       Neo4j GraphRAG ingestion and retrieval
-harness/        AGENTS.md, permissions.json, progress.md, failures.md
+harness/        AGENTS.md, TASK.md, permissions.json, task/progress/failure state
 interfaces/     api_server.py (FastAPI), acp_server.py (ACP, used by the VS Code extension)
 skills/         Reusable, project-specific procedures the agent can reference
 ui/             Browser UI
@@ -248,7 +226,7 @@ vscode-extension/   VS Code extension (ACP client)
 tests/          pytest suite
 cli.py          Command-line entry point
 Makefile        verify, lint, test, run-api
-Dockerfile.sandbox  Sandbox image
+Dockerfile.sandbox  Optional sandbox image
 pyproject.toml, uv.lock   Dependencies
 ```
 
@@ -256,7 +234,7 @@ pyproject.toml, uv.lock   Dependencies
 
 ## Getting started
 
-**Prerequisites:** Python 3.12+, [uv](https://docs.astral.sh/uv/), Docker, and a running Neo4j instance if you use GraphRAG.
+**Prerequisites:** Python 3.12+, [uv](https://docs.astral.sh/uv/), and a running Neo4j instance if you use GraphRAG. Docker is optional in `auto` mode.
 
 ```bash
 git clone https://github.com/Muditshrivastav/AI-Coding-Agent.git
@@ -268,7 +246,7 @@ uv sync
 # Configure environment
 cp .env.example .env     # then fill in your keys
 
-# Build the sandbox image
+# Optional: build the sandbox image
 docker build -f Dockerfile.sandbox -t ai-coding-agent-sandbox:latest .
 ```
 
@@ -308,7 +286,8 @@ make run-api        # http://localhost:8000
 **Verification**
 
 ```bash
-make verify         # ruff check, ruff format, pytest
+make check          # ruff check, ruff format --check, pytest (read-only)
+make fix            # auto-fix lint/format issues
 ```
 
 ---
@@ -321,12 +300,14 @@ Copy `.env.example` to `.env`. It covers:
 |---|---|
 | Search and deploy | `tavily_api_key`, `render_api_key` |
 | GitHub OAuth app | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_REDIRECT_URI` |
-| GitHub ingestion | `GITHUB_TOKEN` |
-| Supabase memory | `supabase_uri`, `supabase_url`, `supabase_anon_key`, `supabase_service_role` |
+| GitHub MCP and ingestion | `GITHUB_PERSONAL_ACCESS_TOKEN`, `GITHUB_PAT`, or `GITHUB_TOKEN` |
+| Postgres checkpoints and memory | `supabase_uri`, `SUPABASE_URI`, `DATABASE_URL`, or `SUPABASE_DB_URL` |
 | LangSmith tracing | `LANGSMITH_*` and `LANGCHAIN_*` variables |
 | Neo4j GraphRAG | `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, `NEO4J_DATABASE` |
+| Permissions and sandbox | `PERMISSION_PROFILE`, `SANDBOX_MODE` |
+| Task-loop budgets | `AGENT_MAX_TASK_ATTEMPTS`, `AGENT_MAX_ITERATIONS`, `AGENT_MAX_WALL_CLOCK_MINUTES`, `AGENT_MAX_TOKENS` |
 
-Never commit `.env`. Tune what the agent may do without asking in `harness/permissions.json`.
+Never commit `.env`. `strict` is the default permission profile; configure profiles in `harness/permissions.json`.
 
 ---
 
@@ -334,18 +315,16 @@ Never commit `.env`. Tune what the agent may do without asking in `harness/permi
 
 | File | Contents |
 |---|---|
-| `CODING_AGENT_IMPLEMENTATION.md` | Full implementation spec: stack, harness components, subagents, build loop |
+| `CODING_AGENT_IMPLEMENTATION.md` | Original architecture proposal; some parts are not wired and it is not the runtime source of truth |
 | `GRAPHRAG_DESIGN.md` | GraphRAG ingestion, retrieval, reranking and anti-hallucination design |
-| `SANDBOX_EXECUTION_LIFECYCLE.md` | Clone, sandbox, verify, push and cleanup lifecycle |
-| `TODO_MECHANISM_SPEC.md` | The `write_todos` task-tracking mechanism |
+| `SANDBOX_EXECUTION_LIFECYCLE.md` | Sandbox implementation limits and proposed isolation lifecycle |
+| `TODO_MECHANISM_SPEC.md` | Structured task model, verification, retries, and statuses |
 
 ---
 
-## Open items
+## Known limitations
 
-Carried over from the implementation spec:
-
-- Concurrency: one build at a time in v1 versus parallel threads.
-- API authentication (API keys versus running behind a private network) for the FastAPI layer, since it can trigger real pushes and deploys.
-- Exact Deep Agents `interrupt_before` parameter names to confirm against the installed version when wiring `permissions.json`.
-- Full contents of `skills/` and the `AGENT.md` memory section.
+- Automated browser E2E verification is not implemented.
+- Durable graph checkpointing requires a configured Postgres DSN; otherwise checkpoints are in-memory.
+- The FastAPI service does not currently enforce API authentication.
+- `auto` sandbox mode may fall back to the host shell if Docker is unavailable.

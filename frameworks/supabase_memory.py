@@ -19,6 +19,9 @@ class SupabaseMemory:
             dsn
             or os.getenv("supabase_uri")
             or os.getenv("supabase_url")
+            or os.getenv("SUPABASE_URI")
+            or os.getenv("DATABASE_URL")
+            or os.getenv("SUPABASE_DB_URL")
         )
         if not self._dsn:
             raise ValueError(

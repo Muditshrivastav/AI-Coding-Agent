@@ -8,18 +8,21 @@ export architecture diagrams directly via draw.io tools.
 from typing import Any
 
 import os
+import asyncio
+import logging
 
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from langchain_core.tools import StructuredTool
-from langchain_groq import ChatGroq
-from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
 from langgraph.types import interrupt
 
 from agent.guardrail import HarnessGuard
 from frameworks.deepagents_backend import GuardedShellBackend
 from frameworks.mcp_client import DrawioMCPClient, drawio_mcp_client
+from frameworks.model_config import DESIGNER_MODEL, create_chat_model
+
+logger = logging.getLogger(__name__)
 
 DESIGN_SYSTEM_PROMPT = """You are the design-agent for an autonomous coding harness.
 Your task is to read PLAN.md from the root directory and produce ARCHITECTURE.md.
@@ -33,7 +36,7 @@ WORKSPACE FILE ACCESS:
 - Use `write_architecture` to write ARCHITECTURE.md; it is protected by HarnessGuard.
 
 Follow these strict requirements:
-1. Read `/PLAN.md` with `read_file` before producing any output, and inspect other files when useful.
+1. Read `/AGENTS.md`, `/harness/TASK.md`, and `/PLAN.md` before producing any output, and inspect other files when useful.
 2. Outline components, inter-module communication, data flow, tech choices, and file boundaries.
 3. Structure the output into ARCHITECTURE.md so the build subagent can decompose it into concrete todos.
 4. Use the available draw.io tools to create a visual architecture diagram and export it alongside ARCHITECTURE.md.
@@ -46,12 +49,12 @@ class _WriteArchArgs(BaseModel):
 
 async def make_design_subagent(
     root_dir: str = ".",
+    guard: HarnessGuard | None = None,
 ) -> tuple[Any, DrawioMCPClient]:
     """Build a deep design agent wired with draw.io MCP tools and FileSystemBackend.
 
     What happens inside:
-      1. ``ChatGroq(model="qwen/qwen3.8-27b", temperature=0.2)`` is used as primary LLM,
-         falling back to ``ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)``.
+      1. The centrally configured designer model is used with model-level retries.
       2. ``FilesystemBackend(root_dir)`` lets the agent read files from disk.
       3. A HarnessGuard-protected ``write_architecture`` tool gates every write to
          ARCHITECTURE.md through permissions.json before touching disk.
@@ -74,7 +77,7 @@ async def make_design_subagent(
         finally:
             await drawio.close()
     """
-    guard = HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
+    guard = guard or HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
     arch_path = os.path.join(root_dir, "ARCHITECTURE.md")
 
     def _write_architecture(content: str) -> str:
@@ -100,21 +103,26 @@ async def make_design_subagent(
         args_schema=_WriteArchArgs,
     )
 
-    primary_llm = ChatGroq(model="qwen/qwen3.8-27b", temperature=0.2)
-    fallback_llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
+    primary_llm = create_chat_model(DESIGNER_MODEL, temperature=0.2)
     backend = GuardedShellBackend(FilesystemBackend(root_dir=root_dir), guard)
 
     drawio: DrawioMCPClient = drawio_mcp_client()
-    drawio_tools = await drawio.get_tools()  # POSTs initialize, then list_tools
+    try:
+        drawio_tools = await asyncio.wait_for(
+            drawio.get_tools(),
+            timeout=float(os.getenv("MCP_SERVER_TIMEOUT_SECONDS", "10")),
+        )
+    except Exception as exc:
+        logger.warning("draw.io MCP tools are unavailable: %s", exc)
+        await drawio.close()
+        drawio_tools = []
 
     agent_kwargs = {
         "backend": backend,
         "system_prompt": DESIGN_SYSTEM_PROMPT,
         "tools": [write_arch_tool, *drawio_tools],
     }
-    primary_agent = create_deep_agent(model=primary_llm, **agent_kwargs)
-    fallback_agent = create_deep_agent(model=fallback_llm, **agent_kwargs)
-    agent = primary_agent.with_fallbacks([fallback_agent])
+    agent = create_deep_agent(model=primary_llm, **agent_kwargs)
     return agent, drawio
 
 
@@ -126,5 +134,4 @@ design_subagent: dict[str, Any] = {
     "name": "design-agent",
     "description": "Use AFTER planning-agent. Reads PLAN.md and writes ARCHITECTURE.md dynamically.",
     "system_prompt": DESIGN_SYSTEM_PROMPT,
-    "factory": make_design_subagent,
 }

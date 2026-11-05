@@ -3,26 +3,20 @@ frameworks/mcp_client.py - Official MCP SDK client wrapper.
 Wraps one MCP server (stdio or HTTP) and converts its tools into LangChain StructuredTools.
 """
 
+import logging
 import os
 from contextlib import AsyncExitStack
 from typing import Any
 
 import httpx
-from pydantic import create_model
+from langchain_core.tools import StructuredTool
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamable_http_client
+from mcp.types import TextContent
+from pydantic import create_model
 
-try:
-    from mcp.client.sse import sse_client as streamablehttp_client
-except ImportError:
-    try:
-        from mcp.client.streamable_http import streamable_http_client as streamablehttp_client
-    except ImportError:
-        try:
-            from mcp.client.streamable_http import streamablehttp_client
-        except ImportError:
-            streamablehttp_client = None  # type: ignore[assignment]
-from langchain_core.tools import StructuredTool
+logger = logging.getLogger(__name__)
 
 
 class MCPClientWrapper:
@@ -49,13 +43,11 @@ class MCPClientWrapper:
             )
             read, write = await self._stack.enter_async_context(stdio_client(params))
         elif self._transport == "http":
-            if streamablehttp_client is None:
-                raise ImportError("Neither 'mcp.client.sse.sse_client' nor 'streamable_http_client' is available in your installed MCP SDK.")
             client_kwargs: dict[str, Any] = {"url": self._kwargs["url"]}
             if self._kwargs.get("headers"):
                 client_kwargs["headers"] = self._kwargs["headers"]
             conn = await self._stack.enter_async_context(
-                streamablehttp_client(**client_kwargs)  # type: ignore[operator]
+                streamable_http_client(**client_kwargs)
             )
             # Both sse_client and streamable_http_client return (read, write) or (read, write, _)
             if isinstance(conn, (tuple, list)):
@@ -63,29 +55,41 @@ class MCPClientWrapper:
             else:
                 read, write = conn.read, conn.write
         else:
-            raise ValueError(f"Unsupported transport: {self._transport}. Must be 'stdio' or 'http'.")
+            raise ValueError(
+                f"Unsupported transport: {self._transport}. Must be 'stdio' or 'http'."
+            )
 
-        self._session = await self._stack.enter_async_context(ClientSession(read, write))
+        self._session = await self._stack.enter_async_context(
+            ClientSession(read, write)
+        )
         await self._session.initialize()
 
     async def close(self) -> None:
         self._session = None
         try:
             await self._stack.aclose()
-        except BaseException:
-            # Suppress AnyIO cancel scope / task group exit mismatch or process termination errors on teardown
-            pass
+        except Exception:
+            logger.exception("Failed to close MCP client resources.")
 
     def _make_tool(self, mcp_tool: Any) -> StructuredTool:
-        schema = getattr(mcp_tool, "inputSchema", None) or {"type": "object", "properties": {}}
-        fields = {name: (str, ...) for name in schema.get("properties", {})}
+        schema = getattr(mcp_tool, "inputSchema", None) or {
+            "type": "object",
+            "properties": {},
+        }
+        fields: dict[str, Any] = {
+            name: (str, ...) for name in schema.get("properties", {})
+        }
         args_model = create_model(f"{mcp_tool.name}_Args", **fields) if fields else None
 
         async def _call(**kwargs: Any) -> str:
             if self._session is None:
-                raise RuntimeError("MCPClientWrapper is not connected. Call connect() first.")
+                raise RuntimeError(
+                    "MCPClientWrapper is not connected. Call connect() first."
+                )
             result = await self._session.call_tool(mcp_tool.name, arguments=kwargs)
-            return "\n".join(b.text for b in result.content if hasattr(b, "text"))
+            return "\n".join(
+                block.text for block in result.content if isinstance(block, TextContent)
+            )
 
         return StructuredTool.from_function(
             coroutine=_call,
@@ -145,6 +149,11 @@ class DrawioMCPClient:
         self._http: httpx.AsyncClient = httpx.AsyncClient(timeout=300.0)
         self._session_id: str | None = None
         self._wrapper: MCPClientWrapper | None = None
+        self._tool_names: list[str] = []
+
+    @property
+    def tool_names(self) -> list[str]:
+        return list(self._tool_names)
 
     async def _initialize(self) -> None:
         """POST the MCP initialize request and capture the Mcp-Session-Id header."""
@@ -176,7 +185,9 @@ class DrawioMCPClient:
         if self._wrapper is None:
             await self._initialize()
         assert self._wrapper is not None
-        return await self._wrapper.get_tools()
+        tools = await self._wrapper.get_tools()
+        self._tool_names = [tool.name for tool in tools]
+        return tools
 
     async def close(self) -> None:
         """Tear down the MCP session and the underlying HTTP client."""
@@ -273,7 +284,9 @@ class WebMCPClient:
         env: dict[str, str] | None = None,
     ) -> None:
         self._command = command
-        self._args = args if args is not None else ["-y", "@jason.today/webmcp@latest", "--mcp"]
+        self._args = (
+            args if args is not None else ["-y", "@jason.today/webmcp@latest", "--mcp"]
+        )
         self._env = env
         self._wrapper = MCPClientWrapper(
             transport="stdio",
@@ -333,7 +346,9 @@ class Neo4jMCPClient:
         self._env.setdefault("NEO4J_MCP_USERNAME", username)
         self._env.setdefault("NEO4J_MCP_PASSWORD", password)
         self._env.setdefault("NEO4J_MCP_DATABASE", database)
-        self._env.setdefault("NEO4J_MCP_READ_ONLY", "false" if not read_only else "true")
+        self._env.setdefault(
+            "NEO4J_MCP_READ_ONLY", "false" if not read_only else "true"
+        )
         self._env.setdefault("NEO4J_MCP_TELEMETRY", "false")
         self._env.setdefault("NEO4J_MCP_LOG_LEVEL", "info")
         self._env.setdefault("NEO4J_MCP_LOG_FORMAT", "text")
@@ -380,6 +395,3 @@ def neo4j_mcp_client(
         read_only=read_only,
         env=env,
     )
-
-
-

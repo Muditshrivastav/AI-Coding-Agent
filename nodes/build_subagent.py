@@ -8,11 +8,10 @@ and MCP clients (Render MCP, Draw.io MCP, and custom MCPClientWrappers).
 from __future__ import annotations
 
 import os
+import logging
 from typing import Any
 
-from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend
-from langchain_groq import ChatGroq
 from langchain_ollama import ChatOllama
 
 from frameworks.external_tools import ExternalToolsManager
@@ -25,13 +24,16 @@ from frameworks.mcp_client import (
     drawio_mcp_client,
 )
 from tools.deploy_tools import DeployToolset
-from tools.verification_tools import VerificationToolset, create_verification_tool
+from tools.verification_tools import create_verification_tool
 from tools.api_tools import APIToolset
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from agent.guardrail import HarnessGuard
 from langgraph.types import interrupt
+from frameworks.model_config import BUILDER_MODEL
+
+logger = logging.getLogger(__name__)
 
 BuildMCPClient = MCPClientWrapper | RenderMCPClient
 
@@ -127,15 +129,15 @@ def create_shell_tool(
         func=run_shell,
         name="execute_command",
         description=(
-            "Runs host shell commands from the workspace root with the user's PATH and "
-            "environment, including package installation and Git commands. Use "
+            "Runs shell commands from the workspace root in the configured sandbox, "
+            "including package installation and Git commands. Use "
             "timeout_seconds up to 1800 for long installs/builds. Protected by HarnessGuard."
         ),
         args_schema=ShellCommandArgs,
     )
 
 BUILD_SYSTEM_PROMPT = """You are the build-agent for an autonomous coding harness.
-Your task is to implement the system specified in PLAN.md and ARCHITECTURE.md.
+Implement only the current task supplied by the orchestration loop.
 
 FILESYSTEM PATH RULES (CRITICAL — READ FIRST):
 - ALL filesystem tools (ls, read_file, write_file, edit_file, glob, grep) require POSIX-style virtual paths starting with /
@@ -143,31 +145,29 @@ FILESYSTEM PATH RULES (CRITICAL — READ FIRST):
 - The workspace root is mounted at / so use /agent/core.py not D:\\...\\agent\\core.py
 - To list the workspace root use: ls(path="/")
 - To read a file use: read_file(file_path="/nodes/build_subagent.py")
-- Shell commands via execute_command use the host shell and DO accept normal paths/commands
+- Shell commands via execute_command run in the configured sandbox and accept normal shell paths/commands
 
 Tool Usage & Integration:
 - Permission requests: If the task requires a shell command or file mutation, invoke the corresponding tool instead of waiting for approval in chat or silently skipping the action. HarnessGuard intercepts it before execution and pauses the run for approval when permissions.json says 'ask'. Continue from the resumed tool result after approval. If denied, do not retry through another tool or method.
-- Terminal & Shell Execution: `terminal_run` uses a persistent workspace shell shared with the orchestrator and retains its working directory/environment across calls. Use `terminal_read` after a timeout and `terminal_close` when finished. Use `execute_command` for isolated commands. Do not tell the user shell/Git access is unavailable instead of invoking a tool. HarnessGuard checks every command before execution; set timeouts up to 1800 seconds for long installs/builds.
+- Shell Execution: Use `execute_command` for commands in the configured sandbox. Do not use an alternate host-shell path or tell the user shell/Git access is unavailable instead of invoking a tool. HarnessGuard checks every command before execution; set timeouts up to 1800 seconds for long installs/builds.
 - Filesystem Tools: Use `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep` with POSIX virtual paths (e.g., /agent/core.py, /nodes/build_subagent.py). Always start with ls(path="/") to explore the workspace.
 - Probabilistic Decisions (Low-token): Use the `probabilistic_decision` tool for triage and strategy decisions when encountering errors or needing structured probabilistic categorization without heavy reasoning token overhead.
 - Self-Verification: Call the `run_verification` tool ('all', 'lint', or 'test') to validate your changes. It runs linting and pytest tests, returning actionable stdout/stderr tracebacks. If verification fails, inspect the traceback, resolve the issue in code, and verify again.
 - API Tools & Web Search: Use `tavily_web_search` for web/doc search, GitHub REST tools (`github_create_issue`, `github_list_issues`, `github_create_pr`, `github_repo_info`, `github_list_commits`) for repository management, `supabase_query` for database interactions, `render_service_status` for deployment inspection, `groq_infer` for fast sub-LLM tasks, and `langsmith_recent_runs` for debugging traces.
 - External Tools: Use Tavily search (tavily_search_results_json) to search documentation, libraries, and external APIs.
-- MCP Tools: Use GitHub MCP tools for repository operations (branches, commits, PRs, issues) and Chrome DevTools MCP for browser inspection and UI debugging.
-- Deployment Tools: Use deploy tools (`deploy_to_render`) and Render/Vercel MCP tools to verify and trigger staging/production deployments.
+- MCP Tools: Use only the GitHub, browser, and service tools actually present in this agent's tool list.
+- Deployment Tools: Use deployment tools only when the current task explicitly requires deployment and the relevant approval is granted.
 
 Build Loop Rules:
-1. Orientation: Start with ls(path="/") to explore, then read /AGENTS.md, /PLAN.md, /harness/GITHUB.md, and check git status via execute_command.
-2. Decompose into todos via write_todos.
-3. For each todo item:
+1. Orientation: Read /AGENTS.md, /harness/TASK.md, and /harness/progress.md, then inspect files relevant to the current task.
+2. Do not broaden the task or implement other pending work.
+3. For the current task:
    a. Retrieve context (codebase + docs, Tavily search if needed).
-   b. Write code into files (staged write).
-   c. Run 'run_verification'. If it fails, examine the stderr/traceback and fix on the next attempt.
+   b. Make the smallest complete change for the current task.
+   c. Run the required verify_command and report its raw result; the orchestrator verifies it independently.
    d. Never edit or delete a test simply to make a run pass.
-   e. Commit your changes and mark the todo done.
-4. After completing all todos:
-   a. Run an end-to-end check before declaring the feature complete.
-   b. Follow /harness/GITHUB.md and run git commands via execute_command to stage, commit, and push.
+   e. Do not commit, push, or deploy unless the user explicitly requested it and HarnessGuard approves it.
+4. Do not claim browser E2E verification unless a browser verification tool was actually run.
 """
 
 
@@ -178,6 +178,7 @@ async def get_build_dev_tools(
     include_deploy: bool = True,
     root_dir: str = ".",
     guard: HarnessGuard | None = None,
+    backend: Any | None = None,
 ) -> tuple[list[Any], ExternalToolsManager, list[BuildMCPClient]]:
     """Gathers and resolves all tools for the build subagent:
 
@@ -205,16 +206,16 @@ async def get_build_dev_tools(
                 harness_guard.wrap_tool_with_guard(tool, interrupt_fn=interrupt)
                 for tool in deploy_toolset.get_tools()
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Deployment tools are unavailable: %s", exc)
 
     try:
         api_toolset = APIToolset()
         for api_tool in api_toolset.get_tools():
             if not any(getattr(t, "name", "") == api_tool.name for t in tools):
                 tools.append(harness_guard.wrap_tool_with_guard(api_tool, interrupt_fn=interrupt))
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("API tools are unavailable: %s", exc)
 
     # 2. External Tools Manager (Tavily + GitHub MCP + Chrome DevTools MCP)
     ext_mgr = external_tools_manager or ExternalToolsManager()
@@ -225,8 +226,9 @@ async def get_build_dev_tools(
                 # Wrap every external / MCP tool through the HITL guard so that
                 # patterns like "mcp__github__*" in permissions.json are enforced.
                 tools.append(harness_guard.wrap_tool_with_guard(t, interrupt_fn=interrupt))
-    except Exception:
+    except Exception as exc:
         # Fallback to search tool if MCP connections are offline
+        logger.warning("External MCP tools are unavailable: %s", exc)
         if ext_mgr._tavily_tool and ext_mgr._tavily_tool not in tools:
             tools.append(harness_guard.wrap_tool_with_guard(ext_mgr._tavily_tool, interrupt_fn=interrupt))
 
@@ -242,16 +244,13 @@ async def get_build_dev_tools(
             for t in mcp_tools:
                 if t not in tools:
                     tools.append(harness_guard.wrap_tool_with_guard(t, interrupt_fn=interrupt))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("MCP client %s is unavailable: %s", type(client).__name__, exc)
 
     # 4. Programmatic Self-Verification Tool — wired with interrupt for real HITL escalation
     if not any(getattr(t, "name", "") == "run_verification" for t in tools):
-        try:
-            verification_tool = create_verification_tool(root_dir=root_dir, interrupt_fn=interrupt)
-            tools.append(harness_guard.wrap_tool_with_guard(verification_tool, interrupt_fn=interrupt))
-        except Exception:
-            pass
+        verification_tool = create_verification_tool(root_dir=root_dir, interrupt_fn=interrupt)
+        tools.append(harness_guard.wrap_tool_with_guard(verification_tool, interrupt_fn=interrupt))
 
     # 5. Ollama Nimble probabilistic decision tool.
     if not any(getattr(t, "name", "") == "probabilistic_decision" for t in tools):
@@ -267,62 +266,13 @@ async def get_build_dev_tools(
         # Hard failure here: if the guarded shell tool cannot be created the build
         # subagent must not run without it, as unguarded shell access would be unsafe.
         tools.append(create_shell_tool(
-            LocalShellBackend(root_dir=root_dir, timeout=900, inherit_env=True),
+            backend or LocalShellBackend(root_dir=root_dir, timeout=900, inherit_env=True),
             guard=harness_guard,
             root_dir=root_dir,
         ))
 
     return tools, ext_mgr, clients
 
-
-
-async def make_build_subagent(
-    root_dir: str = ".",
-    model: str = "qwen/qwen3.8-27b",
-    temperature: float = 0.2,
-    extra_tools: list[Any] | None = None,
-    external_tools_manager: ExternalToolsManager | None = None,
-    mcp_clients: list[BuildMCPClient] | None = None,
-) -> tuple[Any, ExternalToolsManager, list[BuildMCPClient]]:
-    """Build a deep build subagent wired with LocalShellBackend, ExternalToolsManager,
-
-    and MCPClientWrapper tools.
-
-    Usage::
-
-        agent, ext_mgr, mcp_clients = await make_build_subagent(root_dir=".")
-        try:
-            await agent.ainvoke({...})
-        finally:
-            await ext_mgr.close_all()
-            for client in mcp_clients:
-                await client.close()
-
-    Returns:
-        (deep_agent, external_tools_manager, active_mcp_clients)
-    """
-    primary_llm = ChatGroq(model=model, temperature=temperature)
-    fallback_llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=temperature, num_ctx=8192)
-    llm: Any = primary_llm.with_fallbacks([fallback_llm])
-    guard = HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
-    raw_backend = LocalShellBackend(root_dir=root_dir, timeout=900, inherit_env=True)
-    backend = GuardedShellBackend(raw_backend, guard)
-
-    tools, ext_mgr, active_mcp_clients = await get_build_dev_tools(
-        base_tools=extra_tools,
-        external_tools_manager=external_tools_manager,
-        mcp_clients=mcp_clients,
-        root_dir=root_dir,
-        guard=guard,
-    )
-
-    agent = create_deep_agent(
-        model=llm,
-        backend=backend,
-        system_prompt=BUILD_SYSTEM_PROMPT,
-        tools=tools,
-    )
-    return agent, ext_mgr, active_mcp_clients
 
 
 def build_dev_subagent(
@@ -332,6 +282,7 @@ def build_dev_subagent(
     root_dir: str = ".",
     backend: Any | None = None,
     guard: HarnessGuard | None = None,
+    tools_already_guarded: bool = False,
 ) -> dict[str, Any]:
     """Constructs the build subagent specification with assigned tools,
 
@@ -341,10 +292,14 @@ def build_dev_subagent(
     """
     # Shared guard for this subagent build.
     harness_guard = guard or HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
-    tools = [
-        harness_guard.wrap_tool_with_guard(tool, interrupt_fn=interrupt)
-        for tool in (all_tools or [])
-    ]
+    tools = (
+        list(all_tools or [])
+        if tools_already_guarded
+        else [
+            harness_guard.wrap_tool_with_guard(tool, interrupt_fn=interrupt)
+            for tool in (all_tools or [])
+        ]
+    )
     shell_backend = backend or GuardedShellBackend(
         LocalShellBackend(root_dir=root_dir, timeout=900, inherit_env=True),
         harness_guard,
@@ -352,7 +307,9 @@ def build_dev_subagent(
 
     ext_mgr = external_tools or ExternalToolsManager()
     # Immediately wire synchronous external tools (like Tavily search) — guarded.
-    if ext_mgr._tavily_tool and ext_mgr._tavily_tool not in tools:
+    if ext_mgr._tavily_tool and not any(
+        getattr(tool, "name", "") == ext_mgr._tavily_tool.name for tool in tools
+    ):
         tools.append(harness_guard.wrap_tool_with_guard(ext_mgr._tavily_tool, interrupt_fn=interrupt))
 
     # Immediately wire API Tools (Tavily, GitHub REST, Supabase, Render, Groq, LangSmith) — guarded
@@ -361,15 +318,12 @@ def build_dev_subagent(
         for api_tool in api_toolset.get_tools():
             if not any(getattr(t, "name", "") == api_tool.name for t in tools):
                 tools.append(harness_guard.wrap_tool_with_guard(api_tool, interrupt_fn=interrupt))
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("API tools are unavailable: %s", exc)
 
     # Immediately wire self-verification tool with real HITL escalation
     if not any(getattr(t, "name", "") == "run_verification" for t in tools):
-        try:
-            tools.append(create_verification_tool(root_dir=root_dir, interrupt_fn=interrupt))
-        except Exception:
-            pass
+        tools.append(create_verification_tool(root_dir=root_dir, interrupt_fn=interrupt))
 
     # Immediately wire the Ollama Nimble probabilistic decision tool.
     if not any(getattr(t, "name", "") == "probabilistic_decision" for t in tools):
@@ -384,19 +338,6 @@ def build_dev_subagent(
         "name": "build-agent",
         "description": "Use AFTER design-agent. Implements, verifies, commits, deploys with external tools and MCP.",
         "system_prompt": BUILD_SYSTEM_PROMPT,
+        "model": BUILDER_MODEL,
         "tools": tools,
-        "factory": make_build_subagent,
-        "external_tools": ext_mgr,
-        "mcp_clients": mcp_clients or [],
     }
-
-
-# ---------------------------------------------------------------------------
-# Convenience static spec for declarative harnesses
-# ---------------------------------------------------------------------------
-build_subagent: dict[str, Any] = {
-    "name": "build-agent",
-    "description": "Use AFTER design-agent. Implements, verifies, commits, deploys with external tools and MCP.",
-    "system_prompt": BUILD_SYSTEM_PROMPT,
-    "factory": make_build_subagent,
-}

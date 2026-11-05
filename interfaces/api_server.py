@@ -2,16 +2,18 @@
 interfaces/api_server.py - FastAPI service providing HTTP & SSE surface over CodingAgentHarness.
 """
 
+import asyncio
+import logging
+import os
 import uuid
-from typing import Any
+from contextlib import asynccontextmanager
+from pathlib import Path
+import sys
+from typing import Any, AsyncIterator
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel
-
-import logging
-import os
-from pathlib import Path
-import sys
 
 # Ensure repository root is on sys.path even when executed directly
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -28,7 +30,37 @@ from tools.github_oauth import vault, build_authorization_url, exchange_code_for
 logger = logging.getLogger("api_server")
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="Coding Agent Harness API", version="0.1.0")
+harness = None
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    global harness
+    logger.info("AGENT_ROOT_DIR = %s", os.environ.get("AGENT_ROOT_DIR", "<not set>"))
+    logger.info("VSCODE_CWD = %s", os.environ.get("VSCODE_CWD", "<not set>"))
+    try:
+        from agent.core import CodingAgentHarness
+
+        root_dir = resolve_workspace_root()
+        logger.info("Agent workspace root resolved to: %s", root_dir)
+        harness = await CodingAgentHarness.create(root_dir=root_dir, tools=None)
+        logger.info("CodingAgentHarness initialized successfully.")
+    except Exception:
+        logger.exception("Harness startup failed.")
+
+    try:
+        yield
+    finally:
+        if harness is not None:
+            await harness.aclose()
+            harness = None
+
+
+app = FastAPI(
+    title="Coding Agent Harness API",
+    version="0.1.0",
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,9 +69,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-harness = None
-
 
 class CreateSessionRequest(BaseModel):
     title: str | None = None
@@ -53,36 +82,7 @@ class RunRequest(BaseModel):
 
 
 class ResumeRequest(BaseModel):
-    approved: bool
-
-
-@app.on_event("startup")
-async def startup_event() -> None:
-    global harness
-    # Log the env var explicitly so it's visible in the uvicorn terminal
-    agent_root_env = os.environ.get("AGENT_ROOT_DIR", "<not set>")
-    vscode_cwd_env = os.environ.get("VSCODE_CWD", "<not set>")
-    logger.info(f"🔑 AGENT_ROOT_DIR = {agent_root_env}")
-    logger.info(f"🔑 VSCODE_CWD     = {vscode_cwd_env}")
-    try:
-        from agent.core import CodingAgentHarness
-        root_dir = resolve_workspace_root()
-        logger.info(f"🗂️  Agent workspace root resolved to: {root_dir}")
-        harness = CodingAgentHarness(root_dir=root_dir, tools=None, sandbox_mode="local")
-        logger.info("✅ CodingAgentHarness initialized successfully (sandbox_mode=local).")
-    except Exception as exc:
-        import traceback
-        logger.error(f"❌ Harness startup failed: {exc}")
-        logger.error(traceback.format_exc())
-        # Leave harness=None so endpoints return 503 instead of crashing
-
-
-@app.on_event("shutdown")
-async def shutdown_event() -> None:
-    global harness
-    if harness is not None:
-        harness.close()
-        harness = None
+    approved: bool | None = None
 
 
 @app.get("/health")
@@ -94,15 +94,29 @@ async def health_check() -> dict[str, Any]:
         "workspace_root": root,
         "workspace_name": os.path.basename(root) or root,
         "agent_root_env": os.environ.get("AGENT_ROOT_DIR", ""),
+        "loaded_tools": harness.loaded_tool_names if harness else [],
+        "mcp_servers": harness.mcp_server_status if harness else {},
+        "sandbox_mode": harness._backend.sandbox_mode if harness else None,
+    }
+
+
+@app.get("/tools")
+async def list_loaded_tools() -> dict[str, Any]:
+    """Expose the tools and MCP servers actually available to the running harness."""
+    if harness is None:
+        raise HTTPException(status_code=503, detail="Harness not initialized.")
+    return {
+        "tools": harness.loaded_tool_names,
+        "mcp_servers": harness.mcp_server_status,
     }
 
 
 @app.get("/models")
 async def get_models() -> dict[str, Any]:
     """Return all supported LLM models and default active model."""
-    from agent.core import SUPPORTED_MODELS
+    from agent.core import DEFAULT_MODEL, SUPPORTED_MODELS
     global harness
-    current_model = harness.model if harness else "groq:qwen/qwen3.8-27b"
+    current_model = harness.model if harness else DEFAULT_MODEL
     return {
         "current_model": current_model,
         "models": [
@@ -150,23 +164,44 @@ async def set_workspace(req: SetWorkspaceRequest) -> dict[str, Any]:
     if not _os.path.isdir(new_root):
         raise HTTPException(status_code=400, detail=f"Directory not found: {new_root}")
 
+    if any(not task.done() for task in active_run_tasks.values()):
+        raise HTTPException(status_code=409, detail="Stop active runs before changing workspaces.")
+
+    old_harness = harness
+    old_root = _os.environ.get("AGENT_ROOT_DIR")
+    old_vscode_cwd = _os.environ.get("VSCODE_CWD")
     # Propagate into process env so reload-triggered workers also see it
     _os.environ["AGENT_ROOT_DIR"] = new_root
     _os.environ["VSCODE_CWD"] = ""  # clear interfering var
 
     try:
         from agent.core import CodingAgentHarness
-        harness = CodingAgentHarness(root_dir=new_root, tools=None, sandbox_mode="local")
-        logger.info(f"🔄 Workspace hot-swapped → {new_root}")
-        return {
-            "status": "ok",
-            "workspace_root": new_root,
-            "workspace_name": _os.path.basename(new_root) or new_root,
-        }
+        new_harness = await CodingAgentHarness.create(root_dir=new_root, tools=None)
     except Exception as exc:
+        if old_root is None:
+            _os.environ.pop("AGENT_ROOT_DIR", None)
+        else:
+            _os.environ["AGENT_ROOT_DIR"] = old_root
+        if old_vscode_cwd is None:
+            _os.environ.pop("VSCODE_CWD", None)
+        else:
+            _os.environ["VSCODE_CWD"] = old_vscode_cwd
         import traceback
         logger.error(f"❌ Workspace set failed: {exc}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(exc))
+
+    harness = new_harness
+    if old_harness is not None:
+        try:
+            await old_harness.aclose()
+        except Exception:
+            logger.exception("Failed to close the previous workspace harness.")
+    logger.info(f"🔄 Workspace hot-swapped → {new_root}")
+    return {
+        "status": "ok",
+        "workspace_root": new_root,
+        "workspace_name": _os.path.basename(new_root) or new_root,
+    }
 
 
 
@@ -229,9 +264,37 @@ async def delete_session(thread_id: str) -> dict[str, Any]:
     return {"thread_id": thread_id, "deleted": deleted}
 
 
-import asyncio
-
 active_run_tasks: dict[str, asyncio.Task] = {}
+
+
+async def _run_in_background(
+    thread_id: str,
+    user_request: str,
+    model: str | None,
+) -> None:
+    """Run one agent task without holding the initiating HTTP request open."""
+    active_harness = harness
+    if active_harness is None:
+        return
+    try:
+        result = await active_harness.run(
+            user_request,
+            thread_id=thread_id,
+            model=model,
+        )
+        if result.get("status") != "awaiting_approval" and result.get("output"):
+            active_harness.sessions.save_message(
+                thread_id,
+                sender="agent",
+                text=str(result["output"]),
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Background run failed for thread %s.", thread_id)
+    finally:
+        if active_run_tasks.get(thread_id) is asyncio.current_task():
+            active_run_tasks.pop(thread_id, None)
 
 
 @app.post("/runs")
@@ -241,68 +304,27 @@ async def start_run(req: RunRequest) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Harness not initialized.")
 
     thread_id = req.thread_id or str(uuid.uuid4())
-
-    # Persist the user message immediately into session storage
-    harness.sessions.save_message(thread_id, sender="user", text=req.user_request)
-
-    # Run harness.run in an asyncio Task so it can be cancelled on request
+    if thread_id in active_run_tasks and not active_run_tasks[thread_id].done():
+        raise HTTPException(status_code=409, detail="A run is already active for this thread.")
+    if not harness.sessions.has_session(thread_id):
+        title_preview = req.user_request.strip().splitlines()
+        harness.sessions.create_session(
+            title=title_preview[0][:40] if title_preview else None,
+            session_id=thread_id,
+        )
+    existing_messages = harness.sessions.get_messages(thread_id)
+    if not existing_messages or (
+        existing_messages[-1].get("sender") != "user"
+        or existing_messages[-1].get("text") != req.user_request
+    ):
+        harness.sessions.save_message(thread_id, sender="user", text=req.user_request)
+    harness.sessions.update_session(thread_id, status="running")
     task = asyncio.create_task(
-        harness.run(req.user_request, thread_id=thread_id, model=req.model)
+        _run_in_background(thread_id, req.user_request, req.model),
+        name=f"agent-run-{thread_id}",
     )
     active_run_tasks[thread_id] = task
-
-    try:
-        result = await task
-
-        # Extract agent response text from LangGraph AgentState:
-        # The result is typically {"status": "complete", "result": AgentState}
-        # AgentState has a "messages" list of LangChain message objects.
-        output_text = None
-        inner = result.get("result") or result  # unwrap if wrapped in {status, result}
-        if isinstance(inner, dict):
-            msgs = inner.get("messages") or []
-            # Walk messages from the end and find the last AI/assistant message
-            for m in reversed(msgs):
-                role = getattr(m, "type", None) or getattr(m, "role", None) or ""
-                if role in ("ai", "assistant"):
-                    content = getattr(m, "content", None)
-                    if isinstance(content, str) and content.strip():
-                        output_text = content.strip()
-                        break
-                    elif isinstance(content, list):
-                        # Content can be a list of blocks [{type: text, text: ...}]
-                        parts = [b.get("text", "") if isinstance(b, dict) else str(b) for b in content]
-                        joined = " ".join(p for p in parts if p).strip()
-                        if joined:
-                            output_text = joined
-                            break
-
-        if output_text is None:
-            # Fallback: legacy output/response keys
-            output_text = (
-                result.get("output")
-                or result.get("response")
-                or (str(result.get("result")) if result.get("result") else None)
-                or "Task completed."
-            )
-
-        if result.get("status") != "awaiting_approval":
-            harness.sessions.save_message(thread_id, sender="agent", text=output_text)
-        return {"thread_id": thread_id, "output": output_text, **{k: v for k, v in result.items() if k != "result"}}
-    except asyncio.CancelledError:
-        logger.info(f"🛑 Run on thread {thread_id} was cancelled by user.")
-        harness.sessions.save_message(thread_id, sender="agent", text="🛑 Execution stopped by user.")
-        return {
-            "thread_id": thread_id,
-            "status": "stopped",
-            "output": "🛑 Execution stopped by user.",
-        }
-    finally:
-        active_run_tasks.pop(thread_id, None)
-        if harness is not None:
-            session = harness.sessions.get_session(thread_id)
-            if not session or session.status != "awaiting_approval":
-                harness._execution_graphs.pop(thread_id, None)
+    return {"thread_id": thread_id, "status": "running"}
 
 import json as _json
 
@@ -479,18 +501,22 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
             if not isinstance(output_text, str) or not output_text.strip():
                 output_text = "Task completed."
 
-            active_harness.sessions.update_session(thread_id, status="active")
+            final_status = result_state.get("status", "complete")
+            active_harness.sessions.update_session(thread_id, status=final_status)
             await active_harness._runtime.persist_session_to_memory(thread_id)
             active_harness.sessions.save_message(thread_id, sender="agent", text=output_text)
             active_harness._execution_graphs.pop(thread_id, None)
             done_ev = _json.dumps({
                 "type": "done",
                 "output": output_text,
-                "status": result_state.get("status", "complete"),
+                "status": final_status,
             })
             yield f"data: {done_ev}\n\n"
 
-
+        except asyncio.CancelledError:
+            active_harness.sessions.update_session(thread_id, status="interrupted")
+            await active_harness._runtime.persist_session_to_memory(thread_id)
+            raise
         except Exception as exc:
             import traceback
             logger.error(f"Stream run error: {exc}\n{traceback.format_exc()}")
@@ -531,9 +557,17 @@ async def get_run_status(thread_id: str) -> dict[str, Any]:
     active_harness = harness
     state = await active_harness.get_state(thread_id) or {}
     messages = active_harness.sessions.get_messages(thread_id)
+    session = active_harness.sessions.get_session(thread_id)
     if "messages" not in state or not state["messages"]:
         state["messages"] = messages
-    return state
+    return {
+        **state,
+        "thread_id": thread_id,
+        "status": session.status if session else state.get("status", "unknown"),
+        "current_task": state.get("current_task"),
+        "progress": state.get("tasks", []),
+        "pending_approval": bool(session and session.status == "awaiting_approval"),
+    }
 
 
 @app.post("/runs/{thread_id}/resume")
@@ -543,6 +577,14 @@ async def resume_run(thread_id: str, req: ResumeRequest) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Harness not initialized.")
 
     active_harness = harness
+    if thread_id in active_run_tasks and not active_run_tasks[thread_id].done():
+        raise HTTPException(status_code=409, detail="A run is already active for this thread.")
+    session = active_harness.sessions.get_session(thread_id)
+    if session and session.status == "awaiting_approval" and req.approved is None:
+        raise HTTPException(
+            status_code=400,
+            detail="An approval decision is required to resume this run.",
+        )
     result = await active_harness.resume(thread_id, approved=req.approved)
     if result.get("status") != "awaiting_approval" and result.get("output"):
         active_harness.sessions.save_message(thread_id, sender="agent", text=result["output"])

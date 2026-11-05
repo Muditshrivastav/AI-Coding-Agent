@@ -11,6 +11,7 @@ three-gate permission pipeline before accessing the filesystem or shell. Remaini
 backend-specific attributes are forwarded transparently.
 """
 
+import logging
 import os
 import posixpath
 from typing import Any
@@ -20,7 +21,9 @@ from deepagents.backends.protocol import BackendProtocol
 from agent.guardrail import HarnessGuard
 
 from frameworks.docker_sandbox import DockerSandboxBackend
+from frameworks.model_config import create_chat_model
 
+logger = logging.getLogger(__name__)
 
 class GuardedShellBackend(BackendProtocol):
     """Wraps LocalShellBackend or DockerSandboxBackend, enforcing HarnessGuard (HITL) on
@@ -295,8 +298,11 @@ class DeepAgentsBackend:
     ) -> None:
         self._root_dir = root_dir
         self._guard = guard or HarnessGuard(os.path.join(root_dir, "harness", "permissions.json"))
-        # Read from explicit param or SANDBOX_MODE env var; default to "local"
-        self._sandbox_mode = sandbox_mode or os.environ.get("SANDBOX_MODE", "local")
+        self._sandbox_mode = (
+            sandbox_mode or os.environ.get("SANDBOX_MODE", "auto")
+        ).lower()
+        if self._sandbox_mode not in {"auto", "docker", "local"}:
+            raise ValueError("SANDBOX_MODE must be 'auto', 'docker', or 'local'.")
 
         if self._sandbox_mode == "local":
             raw_backend: Any = LocalShellBackend(
@@ -304,13 +310,22 @@ class DeepAgentsBackend:
                 timeout=900,
                 inherit_env=True,
             )
+            logger.info("Sandbox active mode: local host shell.")
         else:
-            # "auto" or "docker"
             raw_backend = DockerSandboxBackend(
                 root_dir=root_dir,
                 image=docker_image,
                 auto_fallback=(self._sandbox_mode == "auto"),
             )
+            docker_available = raw_backend.is_docker_available
+            if docker_available:
+                logger.info("Sandbox active mode: Docker (%s).", self._sandbox_mode)
+            elif self._sandbox_mode == "auto":
+                logger.warning(
+                    "Sandbox active mode: local fallback (Docker is unavailable)."
+                )
+            else:
+                logger.warning("Docker sandbox requested but Docker is unavailable.")
 
         self._backend = GuardedShellBackend(raw_backend, self._guard)
 
@@ -369,28 +384,16 @@ class DeepAgentsBackend:
         import inspect
         from deepagents import create_deep_agent
 
-        # deepagents >= 0.7.19 calls .partition() on the model internally, so it must
-        # receive either a plain string model identifier OR a bare BaseChatModel instance.
-        # Do NOT wrap with .with_fallbacks() before passing — that returns a
-        # RunnableWithFallbacks which has no .partition() and causes AttributeError.
         resolved_model: Any
-        fallback_model: Any = None
 
         if isinstance(model, str) and model.startswith("groq:"):
-            from langchain_groq import ChatGroq
-            from langchain_ollama import ChatOllama
-            bare_model = model[len("groq:"):]
-            resolved_model = ChatGroq(model=bare_model, temperature=0.2)
-            fallback_model = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2)
+            resolved_model = create_chat_model(model, temperature=0.2)
         elif isinstance(model, str) and model.startswith("ollama:"):
-            from langchain_groq import ChatGroq
-            from langchain_ollama import ChatOllama
-            bare_model = model[len("ollama:"):]
-            # num_ctx=8192 ensures tool schemas + conversation history fit in context;
-            # the Ollama default (2048) causes tool definitions to be silently truncated,
-            # which is the primary reason tool-calling fails when switching to Ollama models.
-            resolved_model = ChatOllama(model=bare_model, temperature=0.2, num_ctx=8192)
-            fallback_model = ChatGroq(model="qwen/qwen3.8-27b", temperature=0.2)
+            resolved_model = create_chat_model(
+                model,
+                temperature=0.2,
+                num_ctx=8192,
+            )
         else:
             resolved_model = model
 
@@ -412,15 +415,4 @@ class DeepAgentsBackend:
         if state_schema:
             kwargs["state_schema"] = state_schema
 
-        agent = create_deep_agent(**kwargs)
-
-        # Wire the Ollama fallback at the compiled runnable level (post-creation),
-        # so deepagents never sees a RunnableWithFallbacks as its model argument.
-        if fallback_model is not None and hasattr(agent, "with_fallbacks"):
-            agent = agent.with_fallbacks([
-                create_deep_agent(
-                    **{**kwargs, "model": fallback_model}
-                )
-            ])
-
-        return agent
+        return create_deep_agent(**kwargs)

@@ -11,7 +11,9 @@ Main Purpose:
 
 from __future__ import annotations
 
+import logging
 import os
+import sys
 from typing import Any
 from dotenv import load_dotenv
 
@@ -21,6 +23,8 @@ from agent.session_manager import SessionManager, SessionMetadata
 from frameworks.supabase_memory import SupabaseMemory
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 class LangGraphRuntime:
@@ -36,8 +40,10 @@ class LangGraphRuntime:
         session_manager: SessionManager | None = None,
         supabase_memory: SupabaseMemory | None = None,
         root_dir: str = ".",
+        checkpointer_context: Any = None,
     ) -> None:
         self._checkpointer = checkpointer or MemorySaver()
+        self._checkpointer_context = checkpointer_context
         self._session_manager = session_manager or SessionManager(root_dir=root_dir)
 
         # Connect cross-session storage via SupabaseMemory (asyncpg)
@@ -51,6 +57,42 @@ class LangGraphRuntime:
                 or os.getenv("SUPABASE_DB_URL")
             )
             self._supabase_memory = SupabaseMemory(db_dsn) if db_dsn else None
+
+    @classmethod
+    async def create(
+        cls,
+        *,
+        session_manager: SessionManager,
+        root_dir: str = ".",
+    ) -> LangGraphRuntime:
+        """Create a runtime with durable Postgres checkpoints when a DSN is configured."""
+        db_dsn = (
+            os.getenv("supabase_uri")
+            or os.getenv("SUPABASE_URI")
+            or os.getenv("DATABASE_URL")
+            or os.getenv("SUPABASE_DB_URL")
+        )
+        if not db_dsn:
+            logger.info("No Postgres DSN configured; using in-memory graph checkpoints.")
+            return cls(session_manager=session_manager, root_dir=root_dir)
+
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+        context = AsyncPostgresSaver.from_conn_string(db_dsn)
+        checkpointer = await context.__aenter__()
+        try:
+            await checkpointer.setup()
+        except Exception:
+            await context.__aexit__(*sys.exc_info())
+            raise
+
+        logger.info("Using durable Postgres graph checkpoints.")
+        return cls(
+            checkpointer=checkpointer,
+            session_manager=session_manager,
+            root_dir=root_dir,
+            checkpointer_context=context,
+        )
 
     @property
     def checkpointer(self) -> Any:
@@ -149,3 +191,14 @@ class LangGraphRuntime:
                 session_data=asdict(meta),
                 metadata={"title": meta.title, "stage": meta.stage, "status": meta.status},
             )
+
+    async def aclose(self) -> None:
+        """Close database resources owned by the runtime."""
+        try:
+            if self._supabase_memory is not None:
+                await self._supabase_memory.close()
+        finally:
+            if self._checkpointer_context is not None:
+                context = self._checkpointer_context
+                self._checkpointer_context = None
+                await context.__aexit__(None, None, None)

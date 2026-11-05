@@ -9,9 +9,7 @@ from langchain_core.tools import StructuredTool
 
 from nodes.build_subagent import (
     build_dev_subagent,
-    build_subagent,
     get_build_dev_tools,
-    make_build_subagent,
     BUILD_SYSTEM_PROMPT,
 )
 from frameworks.external_tools import ExternalToolsManager
@@ -30,8 +28,10 @@ def test_build_dev_subagent_spec():
     assert any(getattr(t, "name", "") == "run_verification" for t in spec["tools"])
     # Should include LocalShellBackend execute_command tool synchronously
     assert any(getattr(t, "name", "") == "execute_command" for t in spec["tools"])
-    assert spec["factory"] == make_build_subagent
-    assert spec["external_tools"] is ext_mgr
+    tool_names = {tool.name for tool in spec["tools"]}
+    assert {"execute_command", "run_verification"} <= tool_names
+    assert "factory" not in spec
+    assert "external_tools" not in spec
 
 
 def test_build_subagent_guards_prebuilt_tools(tmp_path):
@@ -130,6 +130,56 @@ def test_get_build_dev_tools():
             assert mock_client in returned_clients
 
     asyncio.run(_test())
+
+
+def test_get_build_dev_tools_uses_selected_sandbox_backend(tmp_path):
+    import asyncio
+    import json
+    from types import SimpleNamespace
+    from agent.guardrail import HarnessGuard
+
+    class FakeBackend:
+        def __init__(self):
+            self.commands = []
+
+        def execute(self, command, timeout=900):
+            self.commands.append((command, timeout))
+            return SimpleNamespace(exit_code=0, output="sandbox command ran")
+
+    async def exercise():
+        permissions_path = tmp_path / "harness" / "permissions.json"
+        permissions_path.parent.mkdir()
+        permissions_path.write_text(
+            json.dumps({"allow": ["Bash(*)"], "ask": [], "deny": []}),
+            encoding="utf-8",
+        )
+        external_tools = ExternalToolsManager()
+        with patch.object(external_tools, "get_tools", AsyncMock(return_value=[])):
+            tools, _, _ = await get_build_dev_tools(
+                base_tools=[],
+                external_tools_manager=external_tools,
+                include_deploy=False,
+                root_dir=str(tmp_path),
+                guard=HarnessGuard(str(permissions_path)),
+                backend=backend,
+            )
+        shell_tool = next(tool for tool in tools if tool.name == "execute_command")
+        result = shell_tool.invoke({"cmd": "echo sandbox"})
+        assert "succeeded" in result
+        assert backend.commands == [("echo sandbox", 900)]
+
+    backend = FakeBackend()
+    asyncio.run(exercise())
+
+
+def test_github_mcp_receives_configured_bearer_token():
+    manager = ExternalToolsManager(github_token="test-token")
+
+    manager._init_clients()
+
+    assert manager._mcp_clients["github"]._kwargs["headers"] == {
+        "Authorization": "Bearer test-token"
+    }
 
 
 def test_execute_command_hitl_guardrail(tmp_path):

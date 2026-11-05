@@ -21,10 +21,14 @@ Every denied or rejected event is appended to ``harness/failures.md`` as a struc
 from __future__ import annotations
 
 import json
+import logging
+import os
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Awaitable, Callable, cast
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +105,8 @@ class HarnessGuard:
         permissions_path: str = "harness/permissions.json",
         failures_path: str | None = None,
         silent_mode: bool = False,
+        permission_profile: str | None = None,
+        sandbox_mode: str | None = None,
     ) -> None:
         self._path = Path(permissions_path)
         self._failures_path = Path(
@@ -110,6 +116,20 @@ class HarnessGuard:
         )
         self._permissions: dict[str, list[str]] = {"allow": [], "ask": [], "deny": []}
         self._mtime: float = 0.0
+        requested_profile = (
+            permission_profile or os.getenv("PERMISSION_PROFILE", "strict")
+        ).lower()
+        if requested_profile not in {"strict", "autonomous"}:
+            raise ValueError("PERMISSION_PROFILE must be 'strict' or 'autonomous'.")
+        active_sandbox = (sandbox_mode or os.getenv("SANDBOX_MODE", "auto")).lower()
+        if requested_profile == "autonomous" and active_sandbox not in {"docker", "auto"}:
+            logger.warning(
+                "PERMISSION_PROFILE=autonomous requires SANDBOX_MODE=docker or auto; "
+                "falling back to strict permissions."
+            )
+            requested_profile = "strict"
+        self._profile = requested_profile
+        self._approval_cache: dict[str, set[str]] = {}
         self.silent_mode = silent_mode
         self.load()
 
@@ -131,9 +151,17 @@ class HarnessGuard:
             # failing open.  Reject anything that doesn't pass this check.
             if not isinstance(data, dict):
                 raise ValueError("permissions.json must be a JSON object at the top level.")
+            profiles = data.get("profiles", {})
+            if not isinstance(profiles, dict):
+                raise ValueError("permissions.json 'profiles' must be an object.")
+            profile_data = profiles.get(self._profile, data)
+            if not isinstance(profile_data, dict):
+                raise ValueError(
+                    f"permissions.json profile '{self._profile}' must be an object."
+                )
             validated: dict[str, list[str]] = {"allow": [], "ask": [], "deny": []}
             for key in ("allow", "ask", "deny"):
-                raw = data.get(key, [])
+                raw = profile_data.get(key, [])
                 if not isinstance(raw, list):
                     raise ValueError(
                         f"permissions.json: '{key}' must be a list, got {type(raw).__name__}."
@@ -204,6 +232,16 @@ class HarnessGuard:
 
         return "ask"
 
+    @staticmethod
+    def _active_thread_id() -> str | None:
+        try:
+            from langgraph.config import get_config
+
+            thread_id = get_config().get("configurable", {}).get("thread_id")
+        except (ImportError, RuntimeError):
+            return None
+        return str(thread_id) if thread_id is not None else None
+
     # ------------------------------------------------------------------
     # HITL enforcement pipeline (deny → ask → allow)
     # ------------------------------------------------------------------
@@ -215,6 +253,7 @@ class HarnessGuard:
         *,
         description: str | None = None,
         extra_context: dict[str, Any] | None = None,
+        thread_id: str | None = None,
     ) -> None:
         """Run the full three-gate HITL pipeline for an action.
 
@@ -239,6 +278,7 @@ class HarnessGuard:
         """
         permission = self.check_permission(action_signature)
         label = description or action_signature
+        normalized_signature = " ".join(action_signature.split())
 
         # ── Gate 1: Hard deny ────────────────────────────────────────────
         if permission == "deny":
@@ -258,6 +298,14 @@ class HarnessGuard:
 
         # ── Gate 2: Human-in-the-Loop ────────────────────────────────────
         if permission == "ask":
+            active_thread_id = thread_id or self._active_thread_id()
+            if (
+                active_thread_id is not None
+                and normalized_signature
+                in self._approval_cache.get(active_thread_id, set())
+            ):
+                return
+
             fn = interrupt_fn
             if fn is None:
                 try:
@@ -282,10 +330,12 @@ class HarnessGuard:
 
             # Normalise various response shapes: bool, dict, str
             is_approved: bool = False
+            remember = False
             if isinstance(approval, bool):
                 is_approved = approval
             elif isinstance(approval, dict):
                 is_approved = bool(approval.get("approved", False))
+                remember = bool(approval.get("remember", False))
             elif isinstance(approval, str):
                 is_approved = approval.strip().lower() in {"yes", "true", "approve", "approved"}
 
@@ -302,6 +352,10 @@ class HarnessGuard:
                     resolution="Rejected by operator via HITL interrupt.",
                 )
                 raise PermissionError(msg)
+            if remember and active_thread_id is not None:
+                self._approval_cache.setdefault(active_thread_id, set()).add(
+                    normalized_signature
+                )
 
         # ── Gate 3: Allow (or approved) ──────────────────────────────────
         # Nothing to do — caller proceeds with execution.
