@@ -325,6 +325,7 @@ def build_repair_graph(
 class TaskLoopState(TypedDict, total=False):
     user_request: Required[str]
     execution_thread_id: Required[str]
+    model_id: str
     tasks: list[dict[str, Any]]
     current_task: dict[str, Any]
     task_index: int
@@ -439,7 +440,9 @@ def _execute_verification_command(
             "stderr_tail": str(exc),
         }
     output = "\n".join(
-        part.strip() for part in (result.stdout, result.stderr) if part.strip()
+        part.strip()
+        for part in (result.stdout or "", result.stderr or "")
+        if part.strip()
     )
     return {
         "passed": result.returncode == 0,
@@ -551,14 +554,6 @@ def _build_autonomous_task_graph(
         else:
             if tasks_path.exists():
                 tasks_path.unlink()
-            planner_thread_id = f"{state['execution_thread_id']}:planner"
-            planner_config = {
-                **config,
-                "configurable": {
-                    **config.get("configurable", {}),
-                    "thread_id": planner_thread_id,
-                },
-            }
             prompt = (
                 "Plan the current request only. Read /AGENTS.md and /harness/TASK.md. "
                 "Write PLAN.md, then call write_task_plan with a complete ordered list "
@@ -566,14 +561,34 @@ def _build_autonomous_task_graph(
                 "and an executable verify_command. Do not implement any tasks yet.\n\n"
                 f"Request:\n{state['user_request']}"
             )
-            planner_result = await planner.ainvoke(
-                {"messages": [{"role": "user", "content": prompt}]},
-                config=planner_config,
-            )
-            planner_tokens = _usage_tokens(planner_result)
+            for attempt in range(2):
+                planner_thread_id = f"{state['execution_thread_id']}:planner:{attempt + 1}"
+                planner_config = {
+                    **config,
+                    "configurable": {
+                        **config.get("configurable", {}),
+                        "thread_id": planner_thread_id,
+                    },
+                }
+                attempt_prompt = prompt
+                if attempt:
+                    attempt_prompt = (
+                        "The previous planning attempt did not save harness/tasks.json. "
+                        "Retry the same request and call write_task_plan before finishing.\n\n"
+                        f"{prompt}"
+                    )
+                planner_result = await planner.ainvoke(
+                    {"messages": [{"role": "user", "content": attempt_prompt}]},
+                    config=planner_config,
+                )
+                planner_tokens += _usage_tokens(planner_result)
+                if tasks_path.is_file():
+                    break
             if not tasks_path.is_file():
                 raise RuntimeError(
-                    "Planning agent did not persist a structured task list to harness/tasks.json."
+                    "Planning agent did not persist a structured task list to "
+                    "harness/tasks.json after two attempts. Retry the request; "
+                    "if this repeats, check that the selected model can call tools."
                 )
             plan = load_task_plan(tasks_path)
         tasks = [item.model_dump(mode="json") for item in plan.tasks]

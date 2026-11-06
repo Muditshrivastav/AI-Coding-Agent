@@ -6,7 +6,12 @@ from types import SimpleNamespace
 import pytest
 
 from agent.repair_loop import _configured_budget, build_repair_graph
-from agent.task_plan import TaskPlan, load_task_plan
+from agent.guardrail import HarnessGuard
+from agent.task_plan import (
+    TaskPlan,
+    create_write_task_plan_tool,
+    load_task_plan,
+)
 
 
 class FakePlanner:
@@ -25,6 +30,21 @@ class FakePlanner:
             tasks = self.tasks
         plan = TaskPlan.model_validate({"tasks": tasks})
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(
+            json.dumps(plan.model_dump(mode="json")),
+            encoding="utf-8",
+        )
+        return {"messages": []}
+
+
+class RetryFakePlanner(FakePlanner):
+    async def ainvoke(self, payload, *, config):
+        prompt = payload["messages"][-1]["content"]
+        self.calls.append(prompt)
+        if len(self.calls) == 1:
+            return {"messages": []}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        plan = TaskPlan.model_validate({"tasks": self.tasks})
         self.path.write_text(
             json.dumps(plan.model_dump(mode="json")),
             encoding="utf-8",
@@ -68,6 +88,39 @@ def test_task_loop_budget_configuration_is_validated(monkeypatch):
     monkeypatch.setenv("AGENT_MAX_TOKENS", "0")
     with pytest.raises(ValueError, match="positive integer"):
         _configured_budget("AGENT_MAX_TOKENS", 200_000)
+
+
+def test_write_task_plan_persists_under_strict_workspace_permissions(tmp_path):
+    permissions_path = tmp_path / "harness" / "permissions.json"
+    permissions_path.parent.mkdir(parents=True)
+    permissions_path.write_text(
+        json.dumps(
+            {
+                "allow": ["Write(harness/tasks.json)"],
+                "ask": ["Write(*)", "Write(**/*)"],
+                "deny": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    guard = HarnessGuard(str(permissions_path))
+    tool = create_write_task_plan_tool(str(tmp_path), guard)
+
+    result = tool.invoke(
+        {
+            "tasks": [
+                {
+                    "id": "test-task",
+                    "title": "Persist the plan",
+                    "acceptance_criteria": ["Task plan is saved"],
+                    "verify_command": "python -m pytest -q",
+                }
+            ]
+        }
+    )
+
+    assert result == "Saved 1 tasks to harness/tasks.json."
+    assert load_task_plan(tmp_path / "harness" / "tasks.json").tasks[0].id == "test-task"
 
 
 def test_task_loop_continues_after_blocking_one_task(tmp_path):
@@ -174,3 +227,32 @@ def test_task_loop_uses_structured_verification_results(tmp_path):
     assert task_result.tool_verification_results[0]["exit_code"] == 1
     assert any("structured pytest failure" in note for note in task_result.notes)
     assert result["status"] == "partial"
+
+
+def test_task_loop_retries_if_planner_does_not_persist_task_plan(tmp_path):
+    planner = RetryFakePlanner(tmp_path, [_task("retry-plan")])
+    graph = build_repair_graph(
+        FakeBuildAgent(),
+        planner=planner,
+        root_dir=str(tmp_path),
+        verify_runner=lambda command, **kwargs: {
+            "passed": True,
+            "tier": "task",
+            "exit_code": 0,
+            "stderr_tail": "",
+        },
+    )
+
+    result = asyncio.run(
+        graph.ainvoke(
+            {
+                "user_request": "Implement the retry case",
+                "execution_thread_id": "retry-plan-run",
+            },
+            config={"configurable": {"thread_id": "retry-plan-checkpoint"}},
+        )
+    )
+
+    assert len(planner.calls) == 2
+    assert "did not save harness/tasks.json" in planner.calls[1]
+    assert result["status"] == "complete"

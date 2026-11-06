@@ -239,7 +239,7 @@ async def run_interactive_terminal(harness: Any, root_dir: str) -> None:
         print("🖥️  Frontend: Open http://localhost:5173 to watch runs live")
     else:
         print("ℹ️   UI Link: Offline (running standalone in terminal)")
-        print("💡  To sync with Web UI: run 'uvicorn interfaces.api_server:app --port 8000'")
+        print("💡  To sync with Web UI: run 'python -m interfaces.run_api --port 8000'")
     print("==================================================================\n")
     print("Type your task below (or type 'exit' or 'quit' to stop):\n")
 

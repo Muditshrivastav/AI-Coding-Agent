@@ -43,6 +43,7 @@ def make_planning_subagent(
     root_dir: str = ".",
     extra_tools: list[Any] | None = None,
     guard: HarnessGuard | None = None,
+    model: str | None = None,
 ) -> Any:
     """
     Constructs a deep planning agent that:
@@ -85,7 +86,7 @@ def make_planning_subagent(
         args_schema=_WritePlanArgs,
     )
 
-    primary_llm = create_chat_model(PLANNER_MODEL, temperature=0.2)
+    primary_llm = create_chat_model(model or PLANNER_MODEL, temperature=0.2)
     backend = GuardedShellBackend(FilesystemBackend(root_dir=root_dir), guard)
     middleware = [
         MemoryMiddleware(

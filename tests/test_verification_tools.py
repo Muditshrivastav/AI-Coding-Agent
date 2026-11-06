@@ -2,8 +2,11 @@
 tests/test_verification_tools.py - Unit tests for VerificationToolset and run_verification tool.
 """
 
+import sys
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import patch, MagicMock
+
 from tools.verification_tools import VerificationToolset, create_verification_tool
 
 
@@ -68,6 +71,60 @@ def test_verification_toolset_tier_selection():
         # Should include test target
         called_args = [str(arg) for call_args in mock_cmd.call_args_list for arg in call_args[0][0]]
         assert "tests/test_agent_state.py" in called_args
+
+
+def test_run_lint_falls_back_to_active_python_when_ruff_executable_is_missing():
+    toolset = VerificationToolset(root_dir=".")
+    with patch.object(
+        toolset,
+        "_run_subprocess",
+        side_effect=[
+            FileNotFoundError("ruff"),
+            (0, "lint passed", ""),
+        ],
+    ) as run_subprocess:
+        result = toolset.run_lint()
+
+    assert result["returncode"] == 0
+    assert run_subprocess.call_args_list[1].args[0] == [
+        sys.executable,
+        "-m",
+        "ruff",
+        "check",
+        ".",
+    ]
+
+
+def test_run_tests_falls_back_to_active_python_when_pytest_executable_is_missing():
+    toolset = VerificationToolset(root_dir=".")
+    with patch.object(
+        toolset,
+        "_run_subprocess",
+        side_effect=[
+            FileNotFoundError("pytest"),
+            (0, "tests passed", ""),
+        ],
+    ) as run_subprocess:
+        result = toolset.run_tests("tests/test_agent_state.py")
+
+    assert result["returncode"] == 0
+    assert run_subprocess.call_args_list[1].args[0] == [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_agent_state.py",
+    ]
+
+
+def test_verification_failure_handles_missing_process_output(tmp_path):
+    toolset = VerificationToolset(root_dir=str(tmp_path))
+    with patch.object(toolset, "_run_subprocess", return_value=(1, None, None)):
+        result = toolset.run_verification(tier="test")
+
+    assert result["passed"] is False
+    assert result["exit_code"] == 1
+    assert "without output" in result["report"]
 
 
 def test_verification_toolset_failures_log(tmp_path):

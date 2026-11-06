@@ -15,7 +15,7 @@ A web frontend for the Autonomous Coding Agent Harness modeled after **Google An
 ### 1. Start the Backend API
 In the root directory:
 ```bash
-uvicorn interfaces.api_server:app --reload --port 8000
+python -m interfaces.run_api --reload --port 8000
 ```
 
 ### 2. Start the React Frontend

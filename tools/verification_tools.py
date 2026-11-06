@@ -27,13 +27,20 @@ logic failures (non-zero exit codes). Logic-failure retries are counted via
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import os
 import subprocess
-from typing import Any, Callable
+import sys
+from collections.abc import Callable
+from datetime import datetime, timezone
+from typing import Any
 
-from pydantic import BaseModel, Field
 from langchain_core.tools import StructuredTool
+from pydantic import BaseModel, Field
+
+
+def _output_text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
 
 # ---------------------------------------------------------------------------
 # LangGraph imports — guarded so the module remains importable even if
@@ -41,17 +48,13 @@ from langchain_core.tools import StructuredTool
 # ---------------------------------------------------------------------------
 try:
     from typing import TypedDict
-    from langgraph.graph import StateGraph, START, END
-    from langgraph.types import interrupt
-    from langgraph.types import RetryPolicy
+
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import RetryPolicy, interrupt
     _LANGGRAPH_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _LANGGRAPH_AVAILABLE = False
 
-
-# ---------------------------------------------------------------------------
-# Pydantic schema for the StructuredTool interface (unchanged)
-# ---------------------------------------------------------------------------
 
 class VerificationArgs(BaseModel):
     tier: str = Field(
@@ -221,6 +224,31 @@ class VerificationToolset:
         )
         return res.returncode, res.stdout, res.stderr
 
+    def _run_with_module_fallback(
+        self,
+        command: list[str],
+        module_command: list[str],
+        *,
+        timeout_seconds: int | None,
+        tier: str,
+    ) -> tuple[int, str, str]:
+        try:
+            result = self._run_subprocess(
+                command,
+                timeout_seconds=timeout_seconds,
+                tier=tier,
+            )
+        except FileNotFoundError:
+            result = None
+
+        if result is None or result[0] == 127:
+            return self._run_subprocess(
+                module_command,
+                timeout_seconds=timeout_seconds,
+                tier=tier,
+            )
+        return result
+
     # ------------------------------------------------------------------
     # Public stage methods  (used directly by graph nodes)
     # ------------------------------------------------------------------
@@ -233,7 +261,7 @@ class VerificationToolset:
     ) -> dict[str, Any]:
         """Run ruff static analysis and return a structured result dict.
 
-        Falls back to ``python -m ruff`` if the ``ruff`` binary is not on PATH.
+        Falls back to the active Python's ``ruff`` module if the executable is missing.
         Raises ``subprocess.TimeoutExpired`` / ``FileNotFoundError`` on transient
         OS-level failures so that ``RetryPolicy`` can retry the node.
 
@@ -241,18 +269,12 @@ class VerificationToolset:
         -------
         dict with keys: ``step``, ``returncode``, ``stdout``, ``stderr``
         """
-        rc, out, err = self._run_subprocess(
+        rc, out, err = self._run_with_module_fallback(
             ["ruff", "check", path],
+            [sys.executable, "-m", "ruff", "check", path],
             timeout_seconds=timeout_seconds,
             tier="lint",
         )
-        if rc == 127:
-            # ruff binary missing — try module invocation
-            rc, out, err = self._run_subprocess(
-                ["python", "-m", "ruff", "check", path],
-                timeout_seconds=timeout_seconds,
-                tier="lint",
-            )
         return {"step": "ruff check", "returncode": rc, "stdout": out, "stderr": err}
 
     def run_tests(
@@ -263,7 +285,7 @@ class VerificationToolset:
     ) -> dict[str, Any]:
         """Run pytest and return a structured result dict.
 
-        Falls back to ``python -m pytest`` if the ``pytest`` binary is not on PATH.
+        Falls back to the active Python's ``pytest`` module if the executable is missing.
         Raises ``subprocess.TimeoutExpired`` / ``FileNotFoundError`` on transient
         OS-level failures so that ``RetryPolicy`` can retry the node.
 
@@ -272,20 +294,16 @@ class VerificationToolset:
         dict with keys: ``step``, ``returncode``, ``stdout``, ``stderr``
         """
         cmd = ["pytest", "-q"]
+        module_cmd = [sys.executable, "-m", "pytest", "-q"]
         if test_target:
             cmd.append(test_target)
-        rc, out, err = self._run_subprocess(
+            module_cmd.append(test_target)
+        rc, out, err = self._run_with_module_fallback(
             cmd,
+            module_cmd,
             timeout_seconds=timeout_seconds,
             tier="test",
         )
-        if rc == 127:
-            cmd[0:1] = ["python", "-m", "pytest"]
-            rc, out, err = self._run_subprocess(
-                cmd,
-                timeout_seconds=timeout_seconds,
-                tier="test",
-            )
         return {"step": "pytest", "returncode": rc, "stdout": out, "stderr": err}
 
     # ------------------------------------------------------------------
@@ -379,12 +397,16 @@ class VerificationToolset:
         failure_blocks: list[str] = []
         for r in results:
             if r["returncode"] != 0:
-                output_content = (r["stderr"].strip() or r["stdout"].strip()) or "Process returned non-zero exit status without output."
+                output_content = (
+                    _output_text(r.get("stderr"))
+                    or _output_text(r.get("stdout"))
+                    or "Process returned non-zero exit status without output."
+                )
                 failure_blocks.append(f"[{r['step']}] exit={r['returncode']}\n{output_content}")
 
         # Automatically log failure into harness/failures.md
         failed_summary = "; ".join(
-            f"{r['step']}: {((r['stderr'].strip() or r['stdout'].strip()).splitlines() or ['failed'])[-1]}"
+            f"{r['step']}: {((_output_text(r.get('stderr')) or _output_text(r.get('stdout'))).splitlines() or ['failed'])[-1]}"
             for r in results if r["returncode"] != 0
         )
         self.record_failure(
@@ -428,7 +450,7 @@ class VerificationToolset:
         )
         failures = [item for item in results if item["returncode"] != 0]
         stderr_tail = "\n".join(
-            (item["stderr"].strip() or item["stdout"].strip())[-4000:]
+            (_output_text(item.get("stderr")) or _output_text(item.get("stdout")))[-4000:]
             for item in failures
         )[-4000:]
         return {
@@ -518,11 +540,15 @@ class VerificationToolset:
         failure_blocks: list[str] = []
         for r in results:
             if r["returncode"] != 0:
-                output_content = (r["stderr"].strip() or r["stdout"].strip()) or "Process returned non-zero exit status without output."
+                output_content = (
+                    _output_text(r.get("stderr"))
+                    or _output_text(r.get("stdout"))
+                    or "Process returned non-zero exit status without output."
+                )
                 failure_blocks.append(f"[{r['step']}] exit={r['returncode']}\n{output_content}")
 
         failed_summary = "; ".join(
-            f"{r['step']}: {((r['stderr'].strip() or r['stdout'].strip()).splitlines() or ['failed'])[-1]}"
+            f"{r['step']}: {((_output_text(r.get('stderr')) or _output_text(r.get('stdout'))).splitlines() or ['failed'])[-1]}"
             for r in results if r["returncode"] != 0
         )
 

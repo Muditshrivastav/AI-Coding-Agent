@@ -222,6 +222,9 @@ class HarnessGuard:
             if fnmatch(action_signature, pattern):
                 return "deny"
 
+        if action_signature in self._permissions.get("allow", []):
+            return "allow"
+
         for pattern in self._permissions.get("ask", []):
             if fnmatch(action_signature, pattern):
                 return "ask"

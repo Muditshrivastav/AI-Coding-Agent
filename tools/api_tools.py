@@ -8,7 +8,6 @@ StructuredTool the build-agent can call directly:
     • GitHub REST API — issues, PRs, repo info, commit history (uses GITHUB_PAT)
     • Supabase        — database queries via REST API
     • Render          — deployment status checks
-    • Groq            — fast LLM inference for sub-tasks (summarise, classify)
     • LangSmith       — fetch run traces for self-debugging
 
 All credentials are read from environment variables (.env). No keys are
@@ -19,7 +18,7 @@ from __future__ import annotations
 
 import os
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 from dotenv import load_dotenv
@@ -90,15 +89,6 @@ class _RenderStatusInput(BaseModel):
         default="",
         description="Render service ID to check. If empty, lists all services.",
     )
-
-
-class _GroqInferInput(BaseModel):
-    prompt: str = Field(description="The prompt to send to Groq for fast inference.")
-    model: str = Field(
-        default="llama-3.1-8b-instant",
-        description="Groq model to use (e.g. 'llama-3.1-8b-instant', 'mixtral-8x7b-32768').",
-    )
-    max_tokens: int = Field(default=512, description="Max tokens for the response.")
 
 
 class _LangSmithRunInput(BaseModel):
@@ -371,32 +361,6 @@ def _render_status(service_id: str = "") -> str:
         return f"Render status error: {exc}"
 
 
-def _groq_infer(prompt: str, model: str = "llama-3.1-8b-instant", max_tokens: int = 512) -> str:
-    """Run fast inference on Groq for sub-tasks like summarisation or classification."""
-    api_key = os.getenv("GROQ_API_KEY", "")
-    if not api_key:
-        return "Error: GROQ_API_KEY is not set in .env."
-    try:
-        with httpx.Client(timeout=30.0) as client:
-            resp = client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": max_tokens,
-                    "temperature": 0.2,
-                },
-            )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
-    except Exception as exc:
-        return f"Groq inference error: {exc}"
-
-
 def _langsmith_recent_runs(run_name: str = "", limit: int = 5) -> str:
     """Fetch recent LangSmith trace runs for self-debugging."""
     api_key = os.getenv("LANGSMITH_API_KEY", "")
@@ -452,7 +416,6 @@ class APIToolset:
       - github_list_commits     → Recent commits on a branch
       - supabase_query          → Query Supabase tables via REST
       - render_service_status   → Check Render deployment status
-      - groq_infer              → Fast Groq LLM inference for sub-tasks
       - langsmith_recent_runs   → Fetch recent trace runs for self-debugging
     """
 
@@ -545,17 +508,6 @@ class APIToolset:
                     "If service_id is empty, lists all services. Requires RENDER_API_KEY."
                 ),
                 args_schema=_RenderStatusInput,
-            ),
-
-            # ── Groq Inference ──────────────────────────────────────────────
-            StructuredTool.from_function(
-                func=_groq_infer,
-                name="groq_infer",
-                description=(
-                    "Run a prompt through Groq for fast, cheap LLM inference. "
-                    "Use for summarisation, classification, or any sub-task that doesn't need the full agent."
-                ),
-                args_schema=_GroqInferInput,
             ),
 
             # ── LangSmith ───────────────────────────────────────────────────

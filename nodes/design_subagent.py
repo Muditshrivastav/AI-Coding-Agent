@@ -5,17 +5,16 @@ Connects to the draw.io hosted MCP server so the agent can create and
 export architecture diagrams directly via draw.io tools.
 """
 
-from typing import Any
-
-import os
 import asyncio
 import logging
+import os
+from typing import Any
 
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field
 from langgraph.types import interrupt
+from pydantic import BaseModel, Field
 
 from agent.guardrail import HarnessGuard
 from frameworks.deepagents_backend import GuardedShellBackend
@@ -50,6 +49,8 @@ class _WriteArchArgs(BaseModel):
 async def make_design_subagent(
     root_dir: str = ".",
     guard: HarnessGuard | None = None,
+    model: str | None = None,
+    drawio_client: DrawioMCPClient | None = None,
 ) -> tuple[Any, DrawioMCPClient]:
     """Build a deep design agent wired with draw.io MCP tools and FileSystemBackend.
 
@@ -103,10 +104,11 @@ async def make_design_subagent(
         args_schema=_WriteArchArgs,
     )
 
-    primary_llm = create_chat_model(DESIGNER_MODEL, temperature=0.2)
+    primary_llm = create_chat_model(model or DESIGNER_MODEL, temperature=0.2)
     backend = GuardedShellBackend(FilesystemBackend(root_dir=root_dir), guard)
 
-    drawio: DrawioMCPClient = drawio_mcp_client()
+    owns_drawio_client = drawio_client is None
+    drawio = drawio_client or drawio_mcp_client()
     try:
         drawio_tools = await asyncio.wait_for(
             drawio.get_tools(),
@@ -114,7 +116,8 @@ async def make_design_subagent(
         )
     except Exception as exc:
         logger.warning("draw.io MCP tools are unavailable: %s", exc)
-        await drawio.close()
+        if owns_drawio_client:
+            await drawio.close()
         drawio_tools = []
 
     agent_kwargs = {

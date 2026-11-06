@@ -33,7 +33,7 @@ module.exports = {
       // itself, creating an infinite start→write→reload→start loop.
       // For hot-reload during development use:  pm2 restart api-server
       // or add:  --reload-exclude 'harness/*' --reload-exclude 'logs/*'
-      args: "uvicorn interfaces.api_server:app --host 127.0.0.1 --port 8000",
+      args: "interfaces.run_api --host 127.0.0.1 --port 8000",
       cwd: PROJECT_ROOT,
 
       // Restart policy

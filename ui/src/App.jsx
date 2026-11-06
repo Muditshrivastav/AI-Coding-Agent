@@ -36,8 +36,7 @@ import {
   Search,
   FolderSearch,
   Wrench,
-  Zap,
-  AlertTriangle
+  Zap
 } from 'lucide-react'
 
 const API_BASE = 'http://127.0.0.1:8000'
@@ -421,13 +420,11 @@ export default function App() {
   const [pendingApproval, setPendingApproval] = useState(null)
   const [attachments, setAttachments] = useState([])
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false)
-  const [selectedModel, setSelectedModel] = useState('groq:qwen/qwen3.8-27b')
+  const [selectedModel, setSelectedModel] = useState('ollama:beam:cloud')
   const [isOnline, setIsOnline] = useState(false)
   const [activeDrawer, setActiveDrawer] = useState(null) // null | 'workspace'
   const [sessionSidebarOpen, setSessionSidebarOpen] = useState(false)
-  // Groq rate-limit banner: null | { message, fallbacks }
-  const [rateLimitBanner, setRateLimitBanner] = useState(null)
-  
+
   const fileInputRef = useRef(null)
   const textareaRef = useRef(null)
   const chatEndRef = useRef(null)
@@ -928,9 +925,6 @@ export default function App() {
               ? { ...m, text: (m.text || '') + evt.text }
               : m
             ))
-          } else if (evt.type === 'rate_limit') {
-            // Groq 429 — show the rate-limit banner so the user can switch to Ollama
-            setRateLimitBanner({ message: evt.message, fallbacks: evt.fallbacks || [] })
           } else if (evt.type === 'interrupt') {
             // HITL gate: LangGraph interrupted execution — show the approval card
             setIsRunning(false)
@@ -1008,23 +1002,46 @@ export default function App() {
         body: JSON.stringify({ approved }),
       })
       const data = await res.json()
-      setIsRunning(false)
+      if (!res.ok) {
+        throw new Error(data.detail || `Resume request failed with HTTP ${res.status}`)
+      }
 
+      if (data.status === 'awaiting_approval') {
+        const interrupt = Array.isArray(data.interrupt)
+          ? (data.interrupt[0]?.value || data.interrupt[0])
+          : data.interrupt
+        setPendingApproval({
+          threadId,
+          description: interrupt?.description || interrupt?.signature || 'The agent needs another approval.',
+          action: interrupt?.signature || 'Shell / File modification',
+        })
+      } else {
+        setMessages(prev => [
+          ...prev,
+          {
+            id: `approval-${Date.now()}`,
+            sender: 'agent',
+            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            text: data.output || (approved
+              ? '✅ Action approved. The agent resumed.'
+              : '❌ Action rejected. The agent stopped safely.'),
+          }
+        ])
+      }
+      fetchFiles()
+    } catch (err) {
       setMessages(prev => [
         ...prev,
         {
-          id: `approval-${Date.now()}`,
+          id: `resume-error-${Date.now()}`,
           sender: 'agent',
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          text: approved
-            ? `✅ **Action Approved.** Agent resumed execution.\n\n${JSON.stringify(data, null, 2)}`
-            : `❌ **Action Rejected by User.** Agent stopped safely.`,
+          text: `⚠️ **Could not resume the agent:** ${err.message}`,
         }
       ])
-      fetchFiles()
-    } catch (err) {
-      setIsRunning(false)
       console.error(err)
+    } finally {
+      setIsRunning(false)
     }
   }
 
@@ -1126,40 +1143,6 @@ export default function App() {
 
   return (
     <div className="app-container">
-      {/* ── Groq Rate-Limit Banner ── */}
-      {rateLimitBanner && (
-        <div className="rate-limit-banner">
-          <div className="rate-limit-banner-inner">
-            <AlertTriangle size={16} className="rate-limit-icon" />
-            <div className="rate-limit-body">
-              <span className="rate-limit-title">Groq Token Rate Limit Reached</span>
-              <span className="rate-limit-msg">{rateLimitBanner.message}</span>
-            </div>
-            <div className="rate-limit-actions">
-              {(rateLimitBanner.fallbacks || []).map(fb => (
-                <button
-                  key={fb.id}
-                  className="rate-limit-switch-btn"
-                  onClick={() => {
-                    setSelectedModel(fb.id)
-                    setRateLimitBanner(null)
-                  }}
-                  title={`Switch to ${fb.label}`}
-                >
-                  ⚡ {fb.label}
-                </button>
-              ))}
-            </div>
-            <button
-              className="rate-limit-dismiss"
-              onClick={() => setRateLimitBanner(null)}
-              title="Dismiss"
-            >
-              <X size={14} />
-            </button>
-          </div>
-        </div>
-      )}
       {/* Top ACP Header */}
       <header className="acp-header">
         <div className="acp-header-top">
@@ -1554,7 +1537,7 @@ export default function App() {
                     value={selectedModel}
                     onChange={(e) => setSelectedModel(e.target.value)}
                   >
-                    <option value="groq:qwen/qwen3.8-27b">qwen/qwen3.8-27b (Groq)</option>
+                    <option value="ollama:beam:cloud">beam:cloud (Ollama Cloud)</option>
                     <option value="ollama:gemma4:cloud">gemma4:cloud</option>
                     <option value="ollama:nvidia-nemotron-3-super:cloud">nvidia-nemotron-3-super:cloud</option>
                     <option value="ollama:gpt-oss:120b-cloud">gpt-oss-120b:cloud</option>

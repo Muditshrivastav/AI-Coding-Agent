@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from agent.session_manager import SessionManager
 from interfaces import api_server
 
@@ -74,5 +76,81 @@ def test_mcp_server_failure_does_not_hide_available_tools(monkeypatch):
         assert [tool.name for tool in tools] == ["working_mcp_tool"]
         assert "unavailable" in manager.server_status["down"]
         assert manager.server_status["working"] == "loaded 1 tools"
+
+    asyncio.run(exercise())
+
+
+def test_failed_run_resume_is_rejected_without_restarting(monkeypatch):
+    class FakeSessions:
+        def get_session(self, thread_id):
+            return type("Session", (), {"status": "failed"})()
+
+    class FakeHarness:
+        def __init__(self):
+            self.sessions = FakeSessions()
+
+    async def exercise():
+        fake_harness = FakeHarness()
+        monkeypatch.setattr(api_server, "harness", fake_harness)
+        api_server.active_run_tasks.clear()
+
+        from fastapi import HTTPException
+
+        for _ in range(2):
+            with pytest.raises(HTTPException) as exc_info:
+                await api_server.resume_run(
+                    "failed-thread",
+                    api_server.ResumeRequest(approved=True),
+                )
+            assert exc_info.value.status_code == 409
+            assert "start a new run" in exc_info.value.detail
+
+    asyncio.run(exercise())
+
+
+def test_resume_errors_are_recorded_in_failure_log(monkeypatch, tmp_path):
+    class FakeSessions:
+        def get_session(self, thread_id):
+            return type("Session", (), {"status": "awaiting_approval"})()
+
+    class FakeGuard:
+        def __init__(self):
+            self.logged = []
+
+        def log_failure(self, **kwargs):
+            self.logged.append(kwargs)
+
+    class FakeHarness:
+        def __init__(self):
+            self.sessions = FakeSessions()
+            self._guard = FakeGuard()
+
+        async def resume(self, thread_id, *, approved):
+            raise RuntimeError("Checkpoint store unavailable")
+
+    async def exercise():
+        fake_harness = FakeHarness()
+        monkeypatch.setattr(api_server, "harness", fake_harness)
+        api_server.active_run_tasks.clear()
+
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as exc_info:
+            await api_server.resume_run(
+                "broken-thread",
+                api_server.ResumeRequest(approved=True),
+            )
+
+        assert exc_info.value.status_code == 500
+        assert fake_harness._guard.logged == [
+            {
+                "stage": "resume",
+                "category": "RuntimeError",
+                "description": "Thread broken-thread: Checkpoint store unavailable",
+                "resolution": (
+                    "Resume stopped and the session was marked failed; start a new run."
+                ),
+            }
+        ]
 
     asyncio.run(exercise())

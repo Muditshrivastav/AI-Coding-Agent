@@ -386,14 +386,10 @@ class DeepAgentsBackend:
 
         resolved_model: Any
 
-        if isinstance(model, str) and model.startswith("groq:"):
+        if isinstance(model, str) and model.startswith("ollama:"):
+            resolved_model = create_chat_model(model, temperature=0.2, num_ctx=8192)
+        elif isinstance(model, str):
             resolved_model = create_chat_model(model, temperature=0.2)
-        elif isinstance(model, str) and model.startswith("ollama:"):
-            resolved_model = create_chat_model(
-                model,
-                temperature=0.2,
-                num_ctx=8192,
-            )
         else:
             resolved_model = model
 

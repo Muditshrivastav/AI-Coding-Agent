@@ -55,7 +55,7 @@ It is built on **LangGraph + Deep Agents**, loads optional external services thr
 | Embeddings and reranking | `sentence-transformers`, `langchain-huggingface` | Embeddings and a cross-encoder reranker |
 | Retrieval evaluation | **RAGAS** | Evaluation utilities; not part of per-task verification |
 | Observability | **LangSmith** | Optional tracing when configured |
-| LLM providers | `langchain-groq`, `langchain-ollama`, `langchain-huggingface` | Pluggable model backends via LangChain |
+| LLM providers | `langchain-ollama`, `langchain-huggingface` | Ollama chat models and Hugging Face model utilities via LangChain |
 | Persistence | **Postgres** (`langgraph-checkpoint-postgres`) | Durable LangGraph checkpoints when a Supabase/Postgres DSN is configured |
 | Cross-session memory | **Supabase** (Postgres via `asyncpg`) | Optional session memory and metadata |
 | Sandbox | **Docker** (`docker` SDK) | Isolated command execution when available; `auto` falls back to the local shell |

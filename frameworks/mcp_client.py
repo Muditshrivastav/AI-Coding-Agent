@@ -13,6 +13,7 @@ from langchain_core.tools import StructuredTool
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 from mcp.types import TextContent
 from pydantic import create_model
 
@@ -43,11 +44,16 @@ class MCPClientWrapper:
             )
             read, write = await self._stack.enter_async_context(stdio_client(params))
         elif self._transport == "http":
-            client_kwargs: dict[str, Any] = {"url": self._kwargs["url"]}
+            http_client = None
             if self._kwargs.get("headers"):
-                client_kwargs["headers"] = self._kwargs["headers"]
+                http_client = await self._stack.enter_async_context(
+                    create_mcp_http_client(headers=self._kwargs["headers"])
+                )
             conn = await self._stack.enter_async_context(
-                streamable_http_client(**client_kwargs)
+                streamable_http_client(
+                    self._kwargs["url"],
+                    http_client=http_client,
+                )
             )
             # Both sse_client and streamable_http_client return (read, write) or (read, write, _)
             if isinstance(conn, (tuple, list)):

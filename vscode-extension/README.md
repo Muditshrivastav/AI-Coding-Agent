@@ -51,8 +51,8 @@ then either:
 This opens a dedicated terminal running:
 
 ```
-<.venv>/Scripts/python.exe -m uvicorn interfaces.api_server:app \
-    --host 127.0.0.1 --port 8000 --reload
+<.venv>/Scripts/python.exe -m interfaces.run_api \
+    --host 127.0.0.1 --port 8000
 ```
 
 ### 4 — Chat in the sidebar

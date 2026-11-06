@@ -126,7 +126,7 @@
 
 **m8. Prompt-injection filter is too blunt.** `_INJECTION_PATTERNS` in `agent/core.py` uses substring matching, so a request containing `system:` (YAML, logs) or `you are now` is blocked. Match more narrowly (word boundaries, start-of-line, or require surrounding instruction phrasing) and add tests with legitimate code containing those strings.
 
-**m9. Central model config.** `qwen/qwen3.8-27b` and `gpt-oss:120b-cloud` are hard-coded in `core.py`, `agents_md_writer.py`, the planning, design and build files, and `deepagents_backend.py`. Move them into one config module/env file. Add a note in the README that small models are weak at long multi-step tool use, and let the planner and builder use different models.
+**m9. Central model config.** `beam:cloud` and `gpt-oss:120b-cloud` are hard-coded in `core.py`, `agents_md_writer.py`, the planning, design and build files, and `deepagents_backend.py`. Move them into one config module/env file. Add a note in the README that small models are weak at long multi-step tool use, and let the planner and builder use different models.
 
 **m10. `progress.md` is never updated.** It still says "idle / none". Update it from the M3 loop (see M3) and have the build prompt's orientation step read it.
 

@@ -335,67 +335,12 @@ class StreamRunRequest(BaseModel):
     model: str | None = None
 
 
-# ---------------------------------------------------------------------------
-# Groq rate-limit helpers
-# ---------------------------------------------------------------------------
-
-def _is_groq_rate_limit(exc: Exception) -> bool:
-    """Return True when *exc* represents a Groq HTTP 429 rate-limit response.
-
-    Groq's Python SDK wraps the HTTP response as ``groq.RateLimitError`` or as
-    a generic ``httpx.HTTPStatusError`` / ``requests.HTTPError`` with status 429.
-    We also do a fallback string-match so that any future SDK change is still caught.
-    """
-    # 1. Exact status_code attribute (groq-sdk, httpx, requests)
-    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
-    if status == 429:
-        return True
-
-    # 2. Nested response object (httpx / requests style)
-    resp = getattr(exc, "response", None)
-    if resp is not None:
-        if getattr(resp, "status_code", None) == 429:
-            return True
-
-    # 3. Class name contains "RateLimit"
-    if "ratelimit" in type(exc).__name__.lower():
-        return True
-
-    # 4. Fallback: scan the exception message for "429" or "rate limit"
-    msg = str(exc).lower()
-    if "429" in msg or "rate limit" in msg or "rate_limit" in msg:
-        return True
-
-    return False
-
-
 def _interrupt_details(interrupts: Any) -> dict[str, Any]:
     if not interrupts:
         return {}
     first = interrupts[0]
     raw = getattr(first, "value", first) if not isinstance(first, dict) else first
     return raw if isinstance(raw, dict) else {}
-
-
-_OLLAMA_FALLBACKS = [
-    {"id": "ollama:gpt-oss:120b-cloud",            "label": "GPT-OSS 120B (Cloud)"},
-    {"id": "ollama:gemma4:cloud",                  "label": "Gemma 4 (Cloud)"},
-    {"id": "ollama:nvidia-nemotron-super:cloud",   "label": "NVIDIA Nemotron Super (Cloud)"},
-]
-
-
-def _make_rate_limit_event(current_model: str) -> dict:
-    """Build the SSE payload emitted when Groq returns a 429."""
-    return {
-        "type": "rate_limit",
-        "provider": "groq",
-        "current_model": current_model,
-        "message": (
-            "⚡ Groq rate limit hit (HTTP 429). You have exhausted your Groq token quota. "
-            "Switch to an Ollama model to continue without interruption."
-        ),
-        "fallbacks": _OLLAMA_FALLBACKS,
-    }
 
 
 @app.post("/runs/stream")
@@ -434,7 +379,8 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
             from agent.core import normalize_model_identifier
             from frameworks.agents_md_writer import generate_agents_md
             chosen_model = normalize_model_identifier(req.model) if req.model else active_harness._model
-            agent_to_invoke = active_harness.build_agent_for_model(chosen_model)
+            logger.info("Starting streamed run with model %s.", chosen_model)
+            agent_to_invoke = await active_harness.get_agent_for_model(chosen_model)
 
             async def prepare_agent_run(state: dict[str, Any]) -> None:
                 await generate_agents_md(
@@ -446,6 +392,7 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
             execution_graph = active_harness.create_repair_graph(
                 agent_to_invoke,
                 pre_run=prepare_agent_run,
+                planner=active_harness._planners_by_model[chosen_model],
             )
             active_harness._execution_graphs[thread_id] = execution_graph
             result_state: dict[str, Any] = {}
@@ -455,6 +402,7 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
                         "user_request": req.user_request,
                         "conversation_history": conversation_history,
                         "execution_thread_id": f"{thread_id}:execution:{uuid.uuid4()}",
+                        "model_id": chosen_model,
                         "repair_round": 0,
                         "max_repair_rounds": 3,
                     },
@@ -521,13 +469,7 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
             import traceback
             logger.error(f"Stream run error: {exc}\n{traceback.format_exc()}")
             active_harness._execution_graphs.pop(thread_id, None)
-            if _is_groq_rate_limit(exc):
-                rl_ev = _json.dumps(_make_rate_limit_event(chosen_model))
-                yield f"data: {rl_ev}\n\n"
-                done_msg = "🚫 Groq rate limit reached. Please switch to an Ollama model to continue."
-                done_ev = _json.dumps({"type": "done", "output": done_msg, "status": "rate_limited"})
-            else:
-                done_ev = _json.dumps({"type": "done", "output": f"⚠️ Agent error: {exc}", "status": "error"})
+            done_ev = _json.dumps({"type": "done", "output": f"⚠️ Agent error: {exc}", "status": "error"})
             yield f"data: {done_ev}\n\n"
         finally:
             active_run_tasks.pop(thread_id, None)
@@ -580,12 +522,42 @@ async def resume_run(thread_id: str, req: ResumeRequest) -> dict[str, Any]:
     if thread_id in active_run_tasks and not active_run_tasks[thread_id].done():
         raise HTTPException(status_code=409, detail="A run is already active for this thread.")
     session = active_harness.sessions.get_session(thread_id)
+    if session and session.status == "failed":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This run has failed and was stopped. It cannot be resumed; "
+                "start a new run to try again."
+            ),
+        )
     if session and session.status == "awaiting_approval" and req.approved is None:
         raise HTTPException(
             status_code=400,
             detail="An approval decision is required to resume this run.",
         )
-    result = await active_harness.resume(thread_id, approved=req.approved)
+    try:
+        result = await active_harness.resume(thread_id, approved=req.approved)
+    except ValueError as exc:
+        active_harness._guard.log_failure(
+            stage="resume",
+            category="unavailable-checkpoint",
+            description=f"Thread {thread_id}: {exc}",
+            resolution="Resume stopped; start a new run instead of retrying this checkpoint.",
+        )
+        logger.warning("Run %s cannot be resumed: %s", thread_id, exc)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        active_harness._guard.log_failure(
+            stage="resume",
+            category=type(exc).__name__,
+            description=f"Thread {thread_id}: {exc}",
+            resolution="Resume stopped and the session was marked failed; start a new run.",
+        )
+        logger.exception("Failed to resume run %s.", thread_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Resume failed ({type(exc).__name__}): {exc}",
+        ) from exc
     if result.get("status") != "awaiting_approval" and result.get("output"):
         active_harness.sessions.save_message(thread_id, sender="agent", text=result["output"])
     return {"thread_id": thread_id, **result}

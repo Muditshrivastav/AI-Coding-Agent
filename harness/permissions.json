@@ -2,6 +2,7 @@
   "allow": [
     "Read(*)",
     "Read(**/*)",
+    "Write(harness/tasks.json)",
     "tavily_search*",
     "tavily_web_search*",
     "chrome-devtools*",
@@ -12,7 +13,6 @@
     "github_list_commits",
     "supabase_query",
     "render_service_status",
-    "groq_infer",
     "langsmith_recent_runs",
     "probabilistic_decision",
     "execute_command",

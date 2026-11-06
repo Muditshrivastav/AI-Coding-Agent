@@ -25,7 +25,6 @@ from frameworks.langgraph_runtime import LangGraphRuntime
 from frameworks.model_config import (
     DEFAULT_MODEL,
     FALLBACK_MODEL,
-    GROQ_DEFAULT_MODEL,
 )
 from graphrag.ingest_tool import create_repo_ingest_tool
 from graphrag.tool import create_graphrag_retriever_tool
@@ -99,14 +98,15 @@ _INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 # ---------------------------------------------------------------------------
 # Supported LLM Models registry
-# Includes cloud Ollama models and Groq models
+# Includes supported cloud Ollama models.
 # ---------------------------------------------------------------------------
 SUPPORTED_MODELS: dict[str, dict[str, Any]] = {
-    GROQ_DEFAULT_MODEL: {
-        "id": GROQ_DEFAULT_MODEL,
-        "provider": "groq",
-        "name": GROQ_DEFAULT_MODEL.removeprefix("groq:"),
-        "label": "Qwen 3.8 27B (Groq)",
+    "ollama:beam:cloud": {
+        "id": "ollama:beam:cloud",
+        "provider": "ollama",
+        "name": "beam:cloud",
+        "label": "Beam (Cloud)",
+        "aliases": ["beam:cloud", "beam", "ollama:beam"],
         "fallback": FALLBACK_MODEL,
     },
     "ollama:gemma4:cloud": {
@@ -115,7 +115,7 @@ SUPPORTED_MODELS: dict[str, dict[str, Any]] = {
         "name": "gemma4:cloud",
         "label": "Gemma 4 (Cloud)",
         "aliases": ["gemma4:cloud", "gemma4", "ollama:gemma4"],
-        "fallback": GROQ_DEFAULT_MODEL,
+        "fallback": FALLBACK_MODEL,
     },
     "ollama:nvidia-nemotron-super:cloud": {
         "id": "ollama:nvidia-nemotron-super:cloud",
@@ -128,7 +128,7 @@ SUPPORTED_MODELS: dict[str, dict[str, Any]] = {
             "nemotron-3-super:cloud",
             "ollama:nemotron-3-super:cloud",
         ],
-        "fallback": GROQ_DEFAULT_MODEL,
+        "fallback": FALLBACK_MODEL,
     },
     FALLBACK_MODEL: {
         "id": FALLBACK_MODEL,
@@ -140,7 +140,6 @@ SUPPORTED_MODELS: dict[str, dict[str, Any]] = {
             FALLBACK_MODEL.removeprefix("ollama:"),
             FALLBACK_MODEL,
         ],
-        "fallback": GROQ_DEFAULT_MODEL,
     },
 }
 
@@ -164,8 +163,13 @@ def normalize_model_identifier(model_name: str | None) -> str:
         if cleaned in aliases or cleaned.lower() in [a.lower() for a in aliases]:
             return canonical_id
 
-    # If it starts with provider prefix or is unrecognized, retain as-is or auto-prefix
+    # Reject retired providers rather than allowing a stale selection to route externally.
     if ":" in cleaned:
+        provider = cleaned.partition(":")[0].lower()
+        if provider != "ollama":
+            raise ValueError(
+                f"Unsupported model provider '{provider}'. Only Ollama models are supported."
+            )
         return cleaned
     return f"ollama:{cleaned}"
 
@@ -211,6 +215,8 @@ class CodingAgentHarness:
         self._drawio_client: Any = None
         self._planner_agent: Any = None
         self._design_agent: Any = None
+        self._agents_by_model: dict[str, Any] = {}
+        self._planners_by_model: dict[str, Any] = {}
         self._loaded_tool_names: list[str] = []
         self._additional_mcp_status: dict[str, str] = {}
         self._deploy_tools = DeployToolset(root_dir=root_dir)
@@ -308,10 +314,15 @@ class CodingAgentHarness:
                 guard=harness._guard,
                 backend=harness._backend.backend,
             )
-            planner = make_planning_subagent(root_dir=root_dir, guard=harness._guard)
+            planner = make_planning_subagent(
+                root_dir=root_dir,
+                guard=harness._guard,
+                model=harness._model,
+            )
             designer, drawio_client = await make_design_subagent(
                 root_dir=root_dir,
                 guard=harness._guard,
+                model=harness._model,
             )
             harness._planner_agent = planner
             harness._design_agent = designer
@@ -344,6 +355,7 @@ class CodingAgentHarness:
                     backend=harness._backend.backend,
                     guard=harness._guard,
                     tools_already_guarded=True,
+                    model=harness._model,
                 ),
             ]
             harness._loaded_tool_names = sorted(
@@ -353,15 +365,20 @@ class CodingAgentHarness:
                 | {getattr(tool, "name", str(tool)) for tool in build_tools}
             )
             harness._agent = harness._build_root_agent(harness._model)
+            harness._agents_by_model[harness._model] = harness._agent
+            harness._planners_by_model[harness._model] = planner
+            logger.info("Harness initialized with model %s for root and subagents.", harness._model)
             return harness
         except Exception:
             await harness.aclose()
             raise
 
-    def _build_root_agent(self, model: str) -> Any:
+    def _build_root_agent(
+        self, model: str, subagents: list[dict[str, Any]] | None = None
+    ) -> Any:
         return self._backend.build_agent(
             model=model,
-            subagents=self._subagents,
+            subagents=self._subagents if subagents is None else subagents,
             system_prompt=self._system_prompt,
             tools=self._get_guarded_tools(),
             checkpointer=self._runtime.checkpointer,
@@ -430,6 +447,7 @@ class CodingAgentHarness:
         *,
         max_repair_rounds: int = 3,
         pre_run: Any = None,
+        planner: Any = None,
     ) -> Any:
         """Create a bounded repair controller around an agent graph."""
         selected_agent = agent if agent is not None else self._agent
@@ -443,10 +461,46 @@ class CodingAgentHarness:
             max_repair_rounds=max_repair_rounds,
             guard=self._guard,
             pre_run=pre_run,
-            planner=self._planner_agent
-            or make_planning_subagent(root_dir=self._root_dir, guard=self._guard),
+            planner=planner
+            or self._planner_agent
+            or make_planning_subagent(
+                root_dir=self._root_dir,
+                guard=self._guard,
+                model=self._model,
+            ),
             root_dir=self._root_dir,
         )
+
+    async def get_agent_for_model(self, model: str) -> Any:
+        """Return a root graph whose root and all delegated agents use this model."""
+        chosen_model = normalize_model_identifier(model)
+        cached_agent = self._agents_by_model.get(chosen_model)
+        if cached_agent is not None:
+            return cached_agent
+        if len(self._subagents) < 3:
+            raise RuntimeError("Harness subagents are not initialized.")
+
+        planner = make_planning_subagent(
+            root_dir=self._root_dir,
+            guard=self._guard,
+            model=chosen_model,
+        )
+        designer, _ = await make_design_subagent(
+            root_dir=self._root_dir,
+            guard=self._guard,
+            model=chosen_model,
+            drawio_client=self._drawio_client,
+        )
+        model_subagents = [
+            {**self._subagents[0], "runnable": planner},
+            {**self._subagents[1], "runnable": designer},
+            {**self._subagents[2], "model": chosen_model},
+        ]
+        agent = self._build_root_agent(chosen_model, subagents=model_subagents)
+        self._agents_by_model[chosen_model] = agent
+        self._planners_by_model[chosen_model] = planner
+        logger.info("Built root and subagents with model %s.", chosen_model)
+        return agent
 
     def build_agent_for_model(self, model: str) -> Any:
         """Build the full planning/design/build agent graph for a model."""
@@ -563,7 +617,8 @@ class CodingAgentHarness:
         await self._runtime.persist_session_to_memory(thread_id)
 
         chosen_model = normalize_model_identifier(model) if model else self._model
-        agent_to_invoke = self.build_agent_for_model(chosen_model)
+        logger.info("Starting run with model %s.", chosen_model)
+        agent_to_invoke = await self.get_agent_for_model(chosen_model)
 
         async def prepare_agent_run(state: dict[str, Any]) -> None:
             await generate_agents_md(
@@ -575,6 +630,7 @@ class CodingAgentHarness:
         execution_graph = self.create_repair_graph(
             agent_to_invoke,
             pre_run=prepare_agent_run,
+            planner=self._planners_by_model[chosen_model],
         )
         self._execution_graphs[thread_id] = execution_graph
         try:
@@ -585,6 +641,7 @@ class CodingAgentHarness:
                         thread_id, user_request
                     ),
                     "execution_thread_id": f"{thread_id}:execution:{uuid.uuid4()}",
+                    "model_id": chosen_model,
                     "repair_round": 0,
                     "max_repair_rounds": 3,
                 },
@@ -622,26 +679,41 @@ class CodingAgentHarness:
         """Resume a pending approval or recover a checkpointed run after restart."""
         config = {"configurable": {"thread_id": thread_id}}
         graph = self._execution_graphs.get(thread_id)
-        if graph is None:
-
-            async def prepare_recovered_run(state: dict[str, Any]) -> None:
-                await generate_agents_md(
-                    user_request=state["user_request"],
-                    root_dir=self._root_dir,
-                    model=self._model,
-                )
-
-            graph = self.create_repair_graph(
-                agent=self._agent,
-                pre_run=prepare_recovered_run,
-            )
-            self._execution_graphs[thread_id] = graph
-        snapshot = await graph.aget_state(config)
-        if snapshot is None or not snapshot.values:
-            raise ValueError(f"No checkpointed run exists for thread {thread_id}.")
-        self._sessions.update_session(thread_id, status="running")
-        await self._runtime.persist_session_to_memory(thread_id)
         try:
+            if graph is None:
+                graph = self.create_repair_graph(agent=self._agent)
+                snapshot = await graph.aget_state(config)
+                if snapshot is not None and snapshot.values:
+                    chosen_model = normalize_model_identifier(
+                        snapshot.values.get("model_id", self._model)
+                    )
+                    if chosen_model == self._model:
+                        agent = self._agent
+                        planner = self._planner_agent
+                    else:
+                        agent = await self.get_agent_for_model(chosen_model)
+                        planner = self._planners_by_model[chosen_model]
+
+                    async def prepare_recovered_run(state: dict[str, Any]) -> None:
+                        await generate_agents_md(
+                            user_request=state["user_request"],
+                            root_dir=self._root_dir,
+                            model=chosen_model,
+                        )
+
+                    graph = self.create_repair_graph(
+                        agent=agent,
+                        pre_run=prepare_recovered_run,
+                        planner=planner,
+                    )
+                self._execution_graphs[thread_id] = graph
+
+            snapshot = await graph.aget_state(config)
+            if snapshot is None or not snapshot.values:
+                raise ValueError(f"No checkpointed run exists for thread {thread_id}.")
+
+            self._sessions.update_session(thread_id, status="running")
+            await self._runtime.persist_session_to_memory(thread_id)
             if approved is None:
                 result = await graph.ainvoke(None, config=config)
             else:
@@ -650,13 +722,15 @@ class CodingAgentHarness:
                     config=config,
                 )
         except asyncio.CancelledError:
+            self._execution_graphs.pop(thread_id, None)
             self._sessions.update_session(thread_id, status="interrupted")
             await self._runtime.persist_session_to_memory(thread_id)
             raise
         except Exception:
+            logger.exception("Resume execution failed for thread %s; stopping the run.", thread_id)
+            self._execution_graphs.pop(thread_id, None)
             self._sessions.update_session(thread_id, status="failed")
             await self._runtime.persist_session_to_memory(thread_id)
-            self._execution_graphs.pop(thread_id, None)
             raise
         if isinstance(result, dict) and result.get("__interrupt__"):
             self._sessions.update_session(thread_id, status="awaiting_approval")

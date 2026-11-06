@@ -1,6 +1,8 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from langgraph.checkpoint.memory import MemorySaver
 
 from agent.core import CodingAgentHarness
@@ -78,10 +80,14 @@ def test_runtime_uses_async_postgres_checkpointer_when_dsn_exists(
 
 def test_resume_rebuilds_execution_graph_after_restart(monkeypatch, tmp_path):
     calls = {}
+    selected_agent = object()
+    selected_planner = object()
 
     class FakeGraph:
         async def aget_state(self, config):
-            return SimpleNamespace(values={"status": "running"})
+            return SimpleNamespace(
+                values={"status": "running", "model_id": "ollama:gemma4:cloud"}
+            )
 
         async def ainvoke(self, input_value, *, config):
             calls["input"] = input_value
@@ -99,18 +105,26 @@ def test_resume_rebuilds_execution_graph_after_restart(monkeypatch, tmp_path):
     harness = CodingAgentHarness.__new__(CodingAgentHarness)
     harness._execution_graphs = {}
     harness._agent = object()
+    harness._planner_agent = object()
+    harness._planners_by_model = {"ollama:gemma4:cloud": selected_planner}
     harness._root_dir = str(tmp_path)
-    harness._model = "test-model"
+    harness._model = "ollama:beam:cloud"
     harness._sessions = FakeSessions()
     harness._runtime = FakeRuntime()
     graph = FakeGraph()
 
-    def rebuild(*, agent, pre_run):
-        calls["agent"] = agent
-        calls["pre_run"] = pre_run
+    rebuild_calls = []
+
+    def rebuild(*, agent, planner=None, pre_run=None):
+        rebuild_calls.append({"agent": agent, "planner": planner, "pre_run": pre_run})
         return graph
 
+    async def get_agent_for_model(model):
+        calls["recovered_model"] = model
+        return selected_agent
+
     monkeypatch.setattr(harness, "create_repair_graph", rebuild)
+    monkeypatch.setattr(harness, "get_agent_for_model", get_agent_for_model)
 
     result = asyncio.run(harness.resume("recoverable", approved=None))
 
@@ -119,10 +133,44 @@ def test_resume_rebuilds_execution_graph_after_restart(monkeypatch, tmp_path):
         "output": "Recovered.",
         "result": {"status": "complete", "final_output": "Recovered."},
     }
-    assert calls["agent"] is harness._agent
-    assert calls["pre_run"] is not None
+    assert calls["recovered_model"] == "ollama:gemma4:cloud"
+    assert rebuild_calls[0]["agent"] is harness._agent
+    assert rebuild_calls[1]["agent"] is selected_agent
+    assert rebuild_calls[1]["planner"] is selected_planner
+    assert rebuild_calls[1]["pre_run"] is not None
     assert calls["input"] is None
     assert calls["config"] == {"configurable": {"thread_id": "recoverable"}}
     assert calls["session_status"] == "complete"
     assert calls["persisted"] == "recoverable"
     assert not harness._execution_graphs
+
+
+def test_resume_setup_failure_marks_session_failed_and_clears_graph(monkeypatch, tmp_path):
+    class BrokenGraph:
+        async def aget_state(self, config):
+            raise RuntimeError("Checkpoint store unavailable")
+
+    class FakeSessions:
+        def __init__(self):
+            self.status = None
+
+        def update_session(self, thread_id, *, status):
+            self.status = status
+
+    class FakeRuntime:
+        async def persist_session_to_memory(self, thread_id):
+            pass
+
+    harness = CodingAgentHarness.__new__(CodingAgentHarness)
+    harness._execution_graphs = {}
+    harness._agent = object()
+    harness._sessions = FakeSessions()
+    harness._runtime = FakeRuntime()
+    graph = BrokenGraph()
+    monkeypatch.setattr(harness, "create_repair_graph", lambda *, agent: graph)
+
+    with pytest.raises(RuntimeError, match="Checkpoint store unavailable"):
+        asyncio.run(harness.resume("broken-checkpoint"))
+
+    assert harness._sessions.status == "failed"
+    assert "broken-checkpoint" not in harness._execution_graphs

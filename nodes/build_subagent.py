@@ -153,7 +153,7 @@ Tool Usage & Integration:
 - Filesystem Tools: Use `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep` with POSIX virtual paths (e.g., /agent/core.py, /nodes/build_subagent.py). Always start with ls(path="/") to explore the workspace.
 - Probabilistic Decisions (Low-token): Use the `probabilistic_decision` tool for triage and strategy decisions when encountering errors or needing structured probabilistic categorization without heavy reasoning token overhead.
 - Self-Verification: Call the `run_verification` tool ('all', 'lint', or 'test') to validate your changes. It runs linting and pytest tests, returning actionable stdout/stderr tracebacks. If verification fails, inspect the traceback, resolve the issue in code, and verify again.
-- API Tools & Web Search: Use `tavily_web_search` for web/doc search, GitHub REST tools (`github_create_issue`, `github_list_issues`, `github_create_pr`, `github_repo_info`, `github_list_commits`) for repository management, `supabase_query` for database interactions, `render_service_status` for deployment inspection, `groq_infer` for fast sub-LLM tasks, and `langsmith_recent_runs` for debugging traces.
+- API Tools & Web Search: Use `tavily_web_search` for web/doc search, GitHub REST tools (`github_create_issue`, `github_list_issues`, `github_create_pr`, `github_repo_info`, `github_list_commits`) for repository management, `supabase_query` for database interactions, `render_service_status` for deployment inspection, and `langsmith_recent_runs` for debugging traces.
 - External Tools: Use Tavily search (tavily_search_results_json) to search documentation, libraries, and external APIs.
 - MCP Tools: Use only the GitHub, browser, and service tools actually present in this agent's tool list.
 - Deployment Tools: Use deployment tools only when the current task explicitly requires deployment and the relevant approval is granted.
@@ -283,6 +283,7 @@ def build_dev_subagent(
     backend: Any | None = None,
     guard: HarnessGuard | None = None,
     tools_already_guarded: bool = False,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Constructs the build subagent specification with assigned tools,
 
@@ -312,7 +313,7 @@ def build_dev_subagent(
     ):
         tools.append(harness_guard.wrap_tool_with_guard(ext_mgr._tavily_tool, interrupt_fn=interrupt))
 
-    # Immediately wire API Tools (Tavily, GitHub REST, Supabase, Render, Groq, LangSmith) — guarded
+    # Immediately wire API Tools (Tavily, GitHub REST, Supabase, Render, LangSmith) — guarded
     try:
         api_toolset = APIToolset()
         for api_tool in api_toolset.get_tools():
@@ -338,6 +339,6 @@ def build_dev_subagent(
         "name": "build-agent",
         "description": "Use AFTER design-agent. Implements, verifies, commits, deploys with external tools and MCP.",
         "system_prompt": BUILD_SYSTEM_PROMPT,
-        "model": BUILDER_MODEL,
+        "model": model or BUILDER_MODEL,
         "tools": tools,
     }

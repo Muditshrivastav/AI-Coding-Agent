@@ -19,7 +19,7 @@
  * 3. Provide a "codingAgent.startApi" command that:
  *      • finds the repo's .venv Python
  *      • cd's to the currently open workspace folder
- *      • spawns  uvicorn interfaces.api_server:app  in a dedicated terminal
+ *      • starts the API in a dedicated terminal
  * 4. Provide a "codingAgent.openUi" command that focuses the sidebar view.
  */
 
@@ -431,7 +431,7 @@ async function ensureApiRunning(repoRoot, silent = true) {
 }
 
 /**
- * Launch `uvicorn interfaces.api_server:app` using the repo's .venv Python.
+ * Launch the API using the repo's .venv Python.
  * Sets AGENT_ROOT_DIR to the active open workspace folder (e.g. google-adk).
  *
  * @param {string} repoRoot      - Absolute path to the AI Coding Agent repo (where api_server.py lives).
@@ -474,21 +474,21 @@ function startApiInTerminal(repoRoot, forceRestart = false, silent = false) {
   });
   terminal.show(false);
 
-  // Switch to repo directory, set env vars, then start uvicorn in a restart loop.
+  // Switch to repo directory, set env vars, then start the API in a restart loop.
   // --reload is intentionally omitted: harness/ file writes (AGENTS.md, sessions/)
   // trigger uvicorn restart loops. Instead we use a plain while-loop so the terminal
   // stays alive and uvicorn restarts automatically on crash — without --reload.
   terminal.sendText(`cd "${repoRoot}"`, true);
   terminal.sendText(`$env:AGENT_ROOT_DIR="${targetWorkspace}"`, true);
   terminal.sendText(`$env:VSCODE_CWD=""`, true);
-  // PowerShell restart loop — keeps uvicorn running indefinitely without --reload.
-  // Press Ctrl+C twice (once to stop uvicorn, once to break the loop) to exit manually.
+  // PowerShell restart loop — keeps the API running indefinitely without --reload.
+  // Press Ctrl+C twice (once to stop the API, once to break the loop) to exit manually.
   const cmd = [
     `while ($true) {`,
-    `  Write-Host "[Coding Agent] Starting uvicorn (no --reload)..." -ForegroundColor Cyan`,
-    `  & "${python}" -m uvicorn interfaces.api_server:app --host 127.0.0.1 --port 8000`,
+    `  Write-Host "[Coding Agent] Starting API (no --reload)..." -ForegroundColor Cyan`,
+    `  & "${python}" -m interfaces.run_api --host 127.0.0.1 --port 8000`,
     `  $exit = $LASTEXITCODE`,
-    `  Write-Host "[Coding Agent] uvicorn exited (code $exit). Restarting in 2 s..." -ForegroundColor Yellow`,
+    `  Write-Host "[Coding Agent] API exited (code $exit). Restarting in 2 s..." -ForegroundColor Yellow`,
     `  Start-Sleep -Seconds 2`,
     `}`,
   ].join('; ');

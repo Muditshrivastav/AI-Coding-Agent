@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent import repair_loop
 from agent.repair_loop import build_repair_graph
 
 
@@ -33,6 +34,31 @@ def _initial_state():
         "execution_thread_id": "test-execution",
         "repair_round": 0,
         "max_repair_rounds": 3,
+    }
+
+
+def test_task_verification_handles_missing_process_output(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        repair_loop.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=None,
+            stderr=None,
+        ),
+    )
+
+    result = repair_loop._execute_verification_command(
+        "python -m pytest -q",
+        root_dir=str(tmp_path),
+        timeout_seconds=30,
+    )
+
+    assert result == {
+        "passed": True,
+        "tier": "task",
+        "exit_code": 0,
+        "stderr_tail": "",
     }
 
 

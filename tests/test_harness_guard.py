@@ -99,6 +99,25 @@ class TestCheckPermission:
         guard, _, _ = _make_guard(tmp_path, rules)
         assert guard.check_permission("Bash(rm -rf /tmp)") == "deny"
 
+    def test_exact_allow_overrides_broad_ask_but_not_deny(self, tmp_path):
+        rules = {
+            "allow": ["Write(harness/tasks.json)"],
+            "ask": ["Write(*)", "Write(**/*)"],
+            "deny": ["Write(harness/tasks.json)"],
+        }
+        guard, _, _ = _make_guard(tmp_path, rules)
+
+        assert guard.check_permission("Write(harness/tasks.json)") == "deny"
+
+        rules["deny"] = []
+        permission_file = _make_permissions(tmp_path, rules)
+        guard = HarnessGuard(
+            str(permission_file),
+            failures_path=str(tmp_path / "harness" / "failures.md"),
+        )
+        assert guard.check_permission("Write(harness/tasks.json)") == "allow"
+        assert guard.check_permission("Write(src/app.py)") == "ask"
+
     def test_whitespace_normalisation_bypasses_deny(self, tmp_path):
         """Extra padding around 'rm -rf' must still be caught by the deny rule."""
         guard, _, _ = _make_guard(tmp_path)
@@ -118,6 +137,7 @@ class TestCheckPermission:
         assert guard.check_permission("run_verification") == "ask"
         assert guard.check_permission("Read(.env)") == "deny"
         assert guard.check_permission("Bash(git push origin main)") == "ask"
+        assert guard.check_permission("Write(harness/tasks.json)") == "allow"
 
     def test_autonomous_profile_allows_normal_work_and_asks_for_irreversible_actions(
         self, tmp_path, monkeypatch
