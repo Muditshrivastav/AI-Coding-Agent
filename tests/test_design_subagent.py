@@ -18,7 +18,7 @@ def test_design_subagent_can_read_and_edit_workspace_files(tmp_path, monkeypatch
     )
 
     class FakeDrawioClient:
-        async def get_tools(self):
+        async def get_tools(self, timeout=10.0):
             return []
 
     model = FakeListChatModel(responses=["done"])

@@ -768,16 +768,15 @@ class CodingAgentHarness:
 
     async def aclose(self) -> None:
         """Close every MCP and database session owned by the harness."""
-        await self._external_tools.close_all()
-        clients = list(self._mcp_clients)
         if self._drawio_client is not None:
-            clients.append(self._drawio_client)
-        if clients:
-            results = await asyncio.gather(
-                *(client.close() for client in clients),
-                return_exceptions=True,
-            )
-            for result in results:
-                if isinstance(result, Exception):
-                    logger.warning("Failed to close an MCP session: %s", result)
+            try:
+                await self._drawio_client.close()
+            except Exception as exc:
+                logger.warning("Failed to close an MCP session: %s", exc)
+        for client in reversed(self._mcp_clients):
+            try:
+                await client.close()
+            except Exception as exc:
+                logger.warning("Failed to close an MCP session: %s", exc)
+        await self._external_tools.close_all()
         await self._runtime.aclose()

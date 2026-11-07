@@ -14,16 +14,34 @@ backend-specific attributes are forwarded transparently.
 import logging
 import os
 import posixpath
+import subprocess
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from deepagents.backends import LocalShellBackend
-from deepagents.backends.protocol import BackendProtocol
 from agent.guardrail import HarnessGuard
+
+from deepagents.backends import FilesystemBackend, LocalShellBackend
+from deepagents.backends.filesystem import _resolve_ripgrep_path
+from deepagents.backends.protocol import (
+    BackendProtocol,
+    FileInfo,
+    GlobResult,
+    GrepMatch,
+    GrepResult,
+)
+from deepagents.backends.utils import InvalidGlobPatternError, compile_grep_include_glob
+from deepagents.middleware import filesystem as filesystem_middleware
 
 from frameworks.docker_sandbox import DockerSandboxBackend
 from frameworks.model_config import create_chat_model
 
 logger = logging.getLogger(__name__)
+
+# The deepagents filesystem middleware otherwise abandons glob calls after
+# GLOB_TIMEOUT, even when the guarded backend is still searching.
+filesystem_middleware.GLOB_TIMEOUT = None
+
 
 class GuardedShellBackend(BackendProtocol):
     """Wraps LocalShellBackend or DockerSandboxBackend, enforcing HarnessGuard (HITL) on
@@ -187,11 +205,17 @@ class GuardedShellBackend(BackendProtocol):
     def glob(self, pattern: str, path: str | None = None) -> Any:
         target = self._search_target(path, pattern)
         self._enforce_path("Read", target, f"Find files matching {pattern}")
+        if isinstance(self._backend, FilesystemBackend):
+            return self._glob_filesystem(pattern, path)
         return self._backend.glob(pattern, path)
 
     async def aglob(self, pattern: str, path: str | None = None) -> Any:
         target = self._search_target(path, pattern)
         self._enforce_path("Read", target, f"Find files matching {pattern}")
+        if isinstance(self._backend, FilesystemBackend):
+            import asyncio
+
+            return await asyncio.to_thread(self._glob_filesystem, pattern, path)
         if hasattr(self._backend, "aglob"):
             return await self._backend.aglob(pattern, path)
         import asyncio
@@ -207,6 +231,8 @@ class GuardedShellBackend(BackendProtocol):
     ) -> Any:
         target = self._search_target(path, glob)
         self._enforce_path("Read", target, f"Search files under {target}")
+        if isinstance(self._backend, FilesystemBackend):
+            return self._grep_filesystem(pattern, path, glob, max_count=max_count)
         kwargs: dict[str, Any] = {}
         if glob is not None:
             kwargs["glob"] = glob
@@ -224,6 +250,12 @@ class GuardedShellBackend(BackendProtocol):
     ) -> Any:
         target = self._search_target(path, glob)
         self._enforce_path("Read", target, f"Search files under {target}")
+        if isinstance(self._backend, FilesystemBackend):
+            import asyncio
+
+            return await asyncio.to_thread(
+                self._grep_filesystem, pattern, path, glob, max_count=max_count
+            )
         kwargs: dict[str, Any] = {}
         if glob is not None:
             kwargs["glob"] = glob
@@ -233,6 +265,242 @@ class GuardedShellBackend(BackendProtocol):
             return await self._backend.agrep(pattern, path, **kwargs)
         import asyncio
         return await asyncio.to_thread(self._backend.grep, pattern, path, **kwargs)
+
+    def _glob_filesystem(self, pattern: str, path: str | None) -> GlobResult:
+        """Walk a local filesystem without the library's fixed glob deadline."""
+        try:
+            matches_pattern = compile_grep_include_glob(pattern)
+        except InvalidGlobPatternError as exc:
+            return GlobResult(error=str(exc), matches=None)
+
+        try:
+            search_path = (
+                self._backend.cwd
+                if path is None or path == "/"
+                else self._backend._resolve_path(path)
+            )
+            if not search_path.exists() or not search_path.is_dir():
+                return GlobResult(matches=[])
+        except (OSError, RuntimeError) as exc:
+            display_path = path if path is not None else "<default>"
+            return GlobResult(error=f"Error globbing path '{display_path}': {exc}", matches=[])
+
+        results: list[FileInfo] = []
+        try:
+            for matched_path in search_path.rglob("*"):
+                try:
+                    rel_path = matched_path.relative_to(search_path).as_posix()
+                    if not matches_pattern(rel_path) or not matched_path.is_file():
+                        continue
+                except (PermissionError, OSError, RuntimeError, ValueError):
+                    continue
+
+                if self._backend.virtual_mode:
+                    try:
+                        matched_path.resolve().relative_to(self._backend.cwd)
+                        result_path = self._backend._to_virtual_path(matched_path)
+                    except (OSError, RuntimeError, ValueError):
+                        continue
+                else:
+                    result_path = str(matched_path)
+
+                try:
+                    stat = matched_path.stat()
+                    results.append(
+                        {
+                            "path": result_path,
+                            "is_dir": False,
+                            "size": int(stat.st_size),
+                            "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                        }
+                    )
+                except OSError:
+                    results.append({"path": result_path, "is_dir": False})
+        except (OSError, RuntimeError, ValueError) as exc:
+            display_path = path if path is not None else "<default>"
+            message = f"Glob of '{display_path}' aborted partway: {exc}"
+            logger.warning("%s", message, exc_info=True)
+            results.sort(key=lambda result: result["path"])
+            return GlobResult(error=message, matches=results)
+
+        results.sort(key=lambda result: result["path"])
+        return GlobResult(matches=results)
+
+    def _grep_filesystem(
+        self,
+        pattern: str,
+        path: str | None,
+        include_glob: str | None,
+        *,
+        max_count: int | None,
+    ) -> GrepResult:
+        """Search a local filesystem without the library's fixed grep deadline."""
+        refusal = self._backend._refused_grep_glob_error(include_glob)
+        if refusal is not None:
+            return GrepResult(error=refusal, matches=[])
+
+        try:
+            base_path = self._backend._resolve_path(path or ".")
+        except ValueError:
+            return GrepResult(matches=[])
+        except (OSError, RuntimeError) as exc:
+            return GrepResult(error=f"Error searching path '{path or '.'}': {exc}", matches=[])
+
+        try:
+            if not base_path.exists():
+                return GrepResult(matches=[])
+        except OSError as exc:
+            return GrepResult(error=f"Error searching path '{path or '.'}': {exc}", matches=[])
+
+        matcher = compile_grep_include_glob(include_glob) if include_glob else None
+        root = base_path if base_path.is_dir() else base_path.parent
+        rg_results = self._ripgrep_filesystem(
+            pattern, base_path, include_glob, max_count=max_count
+        )
+        if rg_results is not None:
+            results, truncated = rg_results
+            matches = [
+                {"path": result_path, "line": line, "text": text}
+                for result_path, lines in results.items()
+                for line, text in lines
+            ]
+            return GrepResult(matches=matches, truncated=truncated)
+
+        matches: list[GrepMatch] = []
+        file_errors: list[str] = []
+
+        try:
+            for file_path in root.rglob("*"):
+                try:
+                    if not file_path.is_file():
+                        continue
+                    if matcher is not None and not matcher(file_path.relative_to(root).as_posix()):
+                        continue
+                    if file_path.stat().st_size > self._backend.max_file_size_bytes:
+                        continue
+                    if self._backend.virtual_mode:
+                        try:
+                            virtual_path = self._backend._to_virtual_path(file_path)
+                        except ValueError:
+                            continue
+                        except (OSError, RuntimeError):
+                            logger.warning("Could not resolve grep result path.", exc_info=True)
+                            continue
+                    else:
+                        virtual_path = str(file_path)
+
+                    line_count = 0
+                    with file_path.open(encoding="utf-8", errors="strict") as source:
+                        for line_number, raw_line in enumerate(source, 1):
+                            line_count = line_number
+                            if pattern not in raw_line:
+                                continue
+                            if max_count is not None and len(matches) >= max_count:
+                                return GrepResult(
+                                    error=self._format_grep_file_errors(file_errors),
+                                    matches=matches,
+                                    truncated=True,
+                                )
+                            matches.append(
+                                {
+                                    "path": virtual_path,
+                                    "line": line_number,
+                                    "text": raw_line.rstrip("\n"),
+                                }
+                            )
+                except UnicodeDecodeError as exc:
+                    if line_count:
+                        file_errors.append(f"- {virtual_path}: {type(exc).__name__}: {exc.reason}")
+                except (OSError, RuntimeError) as exc:
+                    file_errors.append(f"- {file_path.name}: {type(exc).__name__}")
+        except (OSError, RuntimeError, ValueError) as exc:
+            return GrepResult(
+                error=f"Search aborted partway: {type(exc).__name__}",
+                matches=matches,
+            )
+
+        return GrepResult(
+            error=self._format_grep_file_errors(file_errors),
+            matches=matches,
+        )
+
+    def _ripgrep_filesystem(
+        self,
+        pattern: str,
+        base_path: Path,
+        include_glob: str | None,
+        *,
+        max_count: int | None,
+    ) -> tuple[dict[str, list[tuple[int, str]]], bool] | None:
+        """Use ripgrep without starting the library's fixed-duration watchdog."""
+        rg_path = _resolve_ripgrep_path()
+        if rg_path is None:
+            return None
+
+        command = [rg_path, "--json", "-F"]
+        if max_count is not None:
+            command.extend(["-m", str(max_count + 1)])
+        if include_glob:
+            command.extend(["--glob", include_glob])
+
+        search_cwd = None
+        if base_path.is_dir():
+            command.extend(["--", pattern, "."])
+            search_cwd = str(base_path)
+        else:
+            command.extend(["--", pattern, str(base_path)])
+
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                cwd=search_cwd,
+            )
+        except (FileNotFoundError, PermissionError, NotADirectoryError):
+            _resolve_ripgrep_path.cache_clear()
+            return None
+
+        assert process.stdout is not None
+        results: dict[str, list[tuple[int, str]]] = {}
+        base_resolved = base_path.resolve()
+        total = 0
+        truncated = False
+        try:
+            for output_line in process.stdout:
+                match = self._backend._parse_rg_match(
+                    output_line,
+                    base_path,
+                    base_resolved,
+                )
+                if match is None:
+                    continue
+                result_path, line, text = match
+                if max_count is not None and total >= max_count:
+                    truncated = True
+                    process.terminate()
+                    break
+                results.setdefault(result_path, []).append((line, text.rstrip("\r\n")))
+                total += 1
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+        finally:
+            process.stdout.close()
+
+        return_code = process.wait()
+        if return_code not in (0, 1) and not truncated:
+            logger.warning("ripgrep exited with code %s; using the Python search fallback.", return_code)
+            return None
+        return results, truncated
+
+    @staticmethod
+    def _format_grep_file_errors(file_errors: list[str]) -> str | None:
+        if not file_errors:
+            return None
+        return "One or more files could not be fully searched:\n" + "\n".join(file_errors)
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> Any:
         for path, _ in files:
@@ -382,6 +650,7 @@ class DeepAgentsBackend:
         state_schema: Any = None,
     ) -> Any:
         import inspect
+
         from deepagents import create_deep_agent
 
         resolved_model: Any

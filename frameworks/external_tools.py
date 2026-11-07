@@ -15,7 +15,6 @@ No PAT is hard-coded. For interactive use, drive token acquisition through
 the OAuth flow exposed at GET /auth/github in api_server.py.
 """
 
-import asyncio
 import logging
 import os
 from typing import Any
@@ -152,7 +151,7 @@ class ExternalToolsManager:
         timeout = float(os.getenv("MCP_SERVER_TIMEOUT_SECONDS", "10"))
         for name, client in self._mcp_clients.items():
             try:
-                await asyncio.wait_for(client.connect(), timeout=timeout)
+                await client.connect(timeout=timeout)
                 self._server_status[name] = "connected"
             except Exception as exc:
                 self._server_status[name] = f"unavailable: {exc}"
@@ -160,7 +159,7 @@ class ExternalToolsManager:
 
     async def close_all(self) -> None:
         """Closes all active MCP client sessions."""
-        for name, client in self._mcp_clients.items():
+        for name, client in reversed(list(self._mcp_clients.items())):
             try:
                 await client.close()
             except Exception as exc:
@@ -182,7 +181,7 @@ class ExternalToolsManager:
             timeout = float(os.getenv("MCP_SERVER_TIMEOUT_SECONDS", "10"))
             for name, client in self._mcp_clients.items():
                 try:
-                    tools = await asyncio.wait_for(client.get_tools(), timeout=timeout)
+                    tools = await client.get_tools(timeout=timeout)
                     all_tools.extend(tools)
                     self._loaded_tool_names.update(tool.name for tool in tools)
                     self._server_status[name] = f"loaded {len(tools)} tools"

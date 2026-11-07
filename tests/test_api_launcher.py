@@ -8,17 +8,24 @@ from interfaces import run_api
 
 def test_selector_loop_factory_uses_windows_selector_loop(monkeypatch):
     monkeypatch.setattr(run_api, "sys", SimpleNamespace(platform="win32"))
-    # Root cause: run_api.sys is the actual sys module. 
-    # monkeypatch.setattr(run_api.sys, "platform", "win32") fails because sys.platform is read-only.
-    # We must patch the 'sys' reference within the run_api module.
+    created_selectors = []
+    expected_loop = object()
+
+    def create_loop(selector):
+        created_selectors.append(selector)
+        return expected_loop
+
+    monkeypatch.setattr(
+        run_api,
+        "asyncio",
+        SimpleNamespace(SelectorEventLoop=create_loop),
+    )
 
     loop = run_api.selector_loop_factory()
 
-    try:
-        assert isinstance(loop, asyncio.SelectorEventLoop)
-        assert isinstance(loop._selector, selectors.SelectSelector)
-    finally:
-        loop.close()
+    assert loop is expected_loop
+    assert len(created_selectors) == 1
+    assert isinstance(created_selectors[0], selectors.SelectSelector)
 
 
 def test_main_passes_custom_loop_factory_to_uvicorn(monkeypatch):
@@ -38,17 +45,29 @@ def test_main_passes_custom_loop_factory_to_uvicorn(monkeypatch):
 def test_uvicorn_can_load_and_use_loop_setup(monkeypatch):
     import uvicorn
 
-    # Root cause: same as above, sys.platform is read-only.
     monkeypatch.setattr(run_api, "sys", SimpleNamespace(platform="win32"))
+    created_selectors = []
+    select_selector = selectors.SelectSelector
+    monkeypatch.setattr(
+        run_api,
+        "selectors",
+        SimpleNamespace(
+            SelectSelector=lambda: created_selectors.append(select_selector())
+            or created_selectors[-1]
+        ),
+    )
     config = uvicorn.Config(
         "interfaces.api_server:app",
         loop="interfaces.run_api:selector_loop_factory",
     )
 
-    loop = config.get_loop_factory()()
+    loop_factory = config.get_loop_factory()
+    assert loop_factory is not None
+    loop = loop_factory()
 
     try:
         assert isinstance(loop, asyncio.SelectorEventLoop)
-        assert isinstance(loop._selector, selectors.SelectSelector)
+        assert len(created_selectors) == 1
+        assert isinstance(created_selectors[0], selectors.SelectSelector)
     finally:
         loop.close()

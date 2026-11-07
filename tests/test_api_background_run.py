@@ -46,16 +46,24 @@ def test_start_run_returns_before_background_execution_finishes(monkeypatch, tmp
 
 def test_mcp_server_failure_does_not_hide_available_tools(monkeypatch):
     from langchain_core.tools import StructuredTool
-    from frameworks.external_tools import ExternalToolsManager
 
-    class FakeClient:
-        def __init__(self, tool=None, error=None):
+    from frameworks.external_tools import ExternalToolsManager
+    from frameworks.mcp_client import MCPClientWrapper
+
+    class FakeClient(MCPClientWrapper):
+        def __init__(
+            self,
+            tool: StructuredTool | None = None,
+            error: Exception | None = None,
+        ):
+            super().__init__(transport="http", url="https://unused.test/mcp")
             self.tool = tool
             self.error = error
 
-        async def get_tools(self):
-            if self.error:
+        async def get_tools(self, timeout: float = 10.0) -> list[StructuredTool]:
+            if self.error is not None:
                 raise self.error
+            assert self.tool is not None
             return [self.tool]
 
     async def exercise():

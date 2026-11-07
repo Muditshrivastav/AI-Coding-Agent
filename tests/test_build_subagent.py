@@ -288,7 +288,7 @@ def test_workspace_shell_inherits_path_and_runs_from_workspace(tmp_path):
     assert "Python" in response.output
 
 
-def test_real_mcp_server_integration(tmp_path):
+def test_real_mcp_server_integration(tmp_path, caplog):
     """Integration test verifying end-to-end communication with an authentic real MCP server.
 
     Launches a real Python MCP server via stdio transport and verifies that
@@ -331,16 +331,10 @@ def test_real_mcp_server_integration(tmp_path):
             command=sys.executable,
             args=[str(server_script)],
         )
+        returned_mgr = None
 
         try:
-            # Connect to real server and fetch real tools
-            await real_client.connect()
-            real_tools = await real_client.get_tools()
-
-            # Verify the tool was retrieved from the actual MCP server
-            assert any(t.name == "add_numbers" for t in real_tools)
-
-            # 3. Integrate this real MCP client into get_build_dev_tools
+            # 3. Let get_build_dev_tools connect to this client and fetch its tools.
             ext_mgr = ExternalToolsManager()
             tools, returned_mgr, returned_clients = await get_build_dev_tools(
                 base_tools=[],
@@ -357,5 +351,8 @@ def test_real_mcp_server_integration(tmp_path):
                 await real_client.close()
             except Exception:
                 pass
+            if returned_mgr is not None:
+                await returned_mgr.close_all()
 
     asyncio.run(_test())
+    assert "Failed to close MCP client resources for" not in caplog.text

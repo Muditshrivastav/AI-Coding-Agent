@@ -3,11 +3,14 @@ frameworks/mcp_client.py - Official MCP SDK client wrapper.
 Wraps one MCP server (stdio or HTTP) and converts its tools into LangChain StructuredTools.
 """
 
+import asyncio
 import logging
 import os
+import time
 from contextlib import AsyncExitStack
 from typing import Any
 
+import anyio
 import httpx
 from langchain_core.tools import StructuredTool
 from mcp import ClientSession, StdioServerParameters
@@ -32,50 +35,58 @@ class MCPClientWrapper:
         self._session: ClientSession | None = None
         self._stack = AsyncExitStack()
 
-    async def connect(self) -> None:
+    async def connect(self, timeout: float = 10.0) -> None:
         if self._session is not None:
             return
 
-        if self._transport == "stdio":
-            params = StdioServerParameters(
-                command=self._kwargs["command"],
-                args=self._kwargs.get("args", []),
-                env=self._kwargs.get("env"),
-            )
-            read, write = await self._stack.enter_async_context(stdio_client(params))
-        elif self._transport == "http":
-            http_client = None
-            if self._kwargs.get("headers"):
-                http_client = await self._stack.enter_async_context(
-                    create_mcp_http_client(headers=self._kwargs["headers"])
+        try:
+            if self._transport == "stdio":
+                params = StdioServerParameters(
+                    command=self._kwargs["command"],
+                    args=self._kwargs.get("args", []),
+                    env=self._kwargs.get("env"),
                 )
-            conn = await self._stack.enter_async_context(
-                streamable_http_client(
-                    self._kwargs["url"],
-                    http_client=http_client,
+                read, write = await self._stack.enter_async_context(stdio_client(params))
+            elif self._transport == "http":
+                http_client = None
+                if self._kwargs.get("headers"):
+                    http_client = await self._stack.enter_async_context(
+                        create_mcp_http_client(headers=self._kwargs["headers"])
+                    )
+                conn = await self._stack.enter_async_context(
+                    streamable_http_client(
+                        self._kwargs["url"],
+                        http_client=http_client,
+                    )
                 )
-            )
-            # Both sse_client and streamable_http_client return (read, write) or (read, write, _)
-            if isinstance(conn, (tuple, list)):
-                read, write = conn[0], conn[1]
+                # Both sse_client and streamable_http_client return (read, write) or (read, write, _)
+                if isinstance(conn, (tuple, list)):
+                    read, write = conn[0], conn[1]
+                else:
+                    read, write = conn.read, conn.write
             else:
-                read, write = conn.read, conn.write
-        else:
-            raise ValueError(
-                f"Unsupported transport: {self._transport}. Must be 'stdio' or 'http'."
-            )
+                raise ValueError(
+                    f"Unsupported transport: {self._transport}. Must be 'stdio' or 'http'."
+                )
 
-        self._session = await self._stack.enter_async_context(
-            ClientSession(read, write)
-        )
-        await self._session.initialize()
+            self._session = await self._stack.enter_async_context(
+                ClientSession(read, write)
+            )
+            await asyncio.wait_for(self._session.initialize(), timeout=timeout)
+        except BaseException:
+            await self.close()
+            raise
 
     async def close(self) -> None:
         self._session = None
+        stack, self._stack = self._stack, AsyncExitStack()
         try:
-            await self._stack.aclose()
+            await stack.aclose()
         except Exception:
-            logger.exception("Failed to close MCP client resources.")
+            logger.exception(
+                "Failed to close MCP client resources for %s transport.",
+                self._transport,
+            )
 
     def _make_tool(self, mcp_tool: Any) -> StructuredTool:
         schema = getattr(mcp_tool, "inputSchema", None) or {
@@ -104,12 +115,20 @@ class MCPClientWrapper:
             args_schema=args_model,
         )
 
-    async def get_tools(self) -> list[StructuredTool]:
-        if self._session is None:
-            await self.connect()
-        assert self._session is not None
-        result = await self._session.list_tools()
-        return [self._make_tool(t) for t in result.tools]
+    async def get_tools(self, timeout: float = 10.0) -> list[StructuredTool]:
+        deadline = time.monotonic() + timeout
+        try:
+            if self._session is None:
+                await self.connect(timeout=max(0.0, deadline - time.monotonic()))
+            assert self._session is not None
+            result = await asyncio.wait_for(
+                self._session.list_tools(),
+                timeout=max(0.0, deadline - time.monotonic()),
+            )
+            return [self._make_tool(t) for t in result.tools]
+        except BaseException:
+            await self.close()
+            raise
 
 
 # ---------------------------------------------------------------------------
@@ -161,15 +180,18 @@ class DrawioMCPClient:
     def tool_names(self) -> list[str]:
         return list(self._tool_names)
 
-    async def _initialize(self) -> None:
+    async def _initialize(self, timeout: float = 10.0) -> None:
         """POST the MCP initialize request and capture the Mcp-Session-Id header."""
-        response = await self._http.post(
-            DRAWIO_MCP_URL,
-            json=_MCP_INIT_PAYLOAD,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            },
+        response = await asyncio.wait_for(
+            self._http.post(
+                DRAWIO_MCP_URL,
+                json=_MCP_INIT_PAYLOAD,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
+            ),
+            timeout=timeout,
         )
         response.raise_for_status()
 
@@ -186,12 +208,12 @@ class DrawioMCPClient:
             headers=session_headers,
         )
 
-    async def get_tools(self) -> list[StructuredTool]:
+    async def get_tools(self, timeout: float = 10.0) -> list[StructuredTool]:
         """Initialize the draw.io session (if needed) and return LangChain tools."""
         if self._wrapper is None:
-            await self._initialize()
+            await self._initialize(timeout)
         assert self._wrapper is not None
-        tools = await self._wrapper.get_tools()
+        tools = await self._wrapper.get_tools(timeout=timeout)
         self._tool_names = [tool.name for tool in tools]
         return tools
 
@@ -226,7 +248,7 @@ class RenderMCPClient:
         self._session_id: str | None = None
         self._wrapper: MCPClientWrapper | None = None
 
-    async def _initialize(self) -> None:
+    async def _initialize(self, timeout: float = 10.0) -> None:
         """POST the MCP initialize request with Bearer authorization and capture session ID."""
         headers = {
             "Content-Type": "application/json",
@@ -235,10 +257,13 @@ class RenderMCPClient:
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
-        response = await self._http.post(
-            RENDER_MCP_URL,
-            json=_MCP_INIT_PAYLOAD,
-            headers=headers,
+        response = await asyncio.wait_for(
+            self._http.post(
+                RENDER_MCP_URL,
+                json=_MCP_INIT_PAYLOAD,
+                headers=headers,
+            ),
+            timeout=timeout,
         )
         response.raise_for_status()
 
@@ -254,12 +279,12 @@ class RenderMCPClient:
             headers=session_headers,
         )
 
-    async def get_tools(self) -> list[StructuredTool]:
+    async def get_tools(self, timeout: float = 10.0) -> list[StructuredTool]:
         """Initialize the Render MCP session and return LangChain tools."""
         if self._wrapper is None:
-            await self._initialize()
+            await self._initialize(timeout)
         assert self._wrapper is not None
-        return await self._wrapper.get_tools()
+        return await self._wrapper.get_tools(timeout=timeout)
 
     async def close(self) -> None:
         """Tear down the MCP session and the underlying HTTP client."""
@@ -301,13 +326,13 @@ class WebMCPClient:
             env=self._env,
         )
 
-    async def connect(self) -> None:
+    async def connect(self, timeout: float = 10.0) -> None:
         """Connect to the WebMCP server process."""
-        await self._wrapper.connect()
+        await self._wrapper.connect(timeout=timeout)
 
-    async def get_tools(self) -> list[StructuredTool]:
+    async def get_tools(self, timeout: float = 10.0) -> list[StructuredTool]:
         """Fetch all browser and page interaction tools exposed by WebMCP."""
-        return await self._wrapper.get_tools()
+        return await self._wrapper.get_tools(timeout=timeout)
 
     async def close(self) -> None:
         """Tear down WebMCP session."""
@@ -367,13 +392,13 @@ class Neo4jMCPClient:
             env=self._env,
         )
 
-    async def connect(self) -> None:
+    async def connect(self, timeout: float = 10.0) -> None:
         """Connect to the Neo4j MCP server process."""
-        await self._wrapper.connect()
+        await self._wrapper.connect(timeout=timeout)
 
-    async def get_tools(self) -> list[StructuredTool]:
+    async def get_tools(self, timeout: float = 10.0) -> list[StructuredTool]:
         """Fetch all Cypher and graph manipulation tools provided by neo4j-mcp-server."""
-        return await self._wrapper.get_tools()
+        return await self._wrapper.get_tools(timeout=timeout)
 
     async def close(self) -> None:
         """Tear down Neo4j MCP session."""

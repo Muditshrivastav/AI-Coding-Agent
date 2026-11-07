@@ -5,7 +5,6 @@ Connects to the draw.io hosted MCP server so the agent can create and
 export architecture diagrams directly via draw.io tools.
 """
 
-import asyncio
 import logging
 import os
 from typing import Any
@@ -110,9 +109,8 @@ async def make_design_subagent(
     owns_drawio_client = drawio_client is None
     drawio = drawio_client or drawio_mcp_client()
     try:
-        drawio_tools = await asyncio.wait_for(
-            drawio.get_tools(),
-            timeout=float(os.getenv("MCP_SERVER_TIMEOUT_SECONDS", "10")),
+        drawio_tools = await drawio.get_tools(
+            timeout=float(os.getenv("MCP_SERVER_TIMEOUT_SECONDS", "10"))
         )
     except Exception as exc:
         logger.warning("draw.io MCP tools are unavailable: %s", exc)
