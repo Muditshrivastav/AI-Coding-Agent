@@ -216,7 +216,7 @@ async def list_sessions() -> list[dict[str, Any]]:
     """List all chat sessions with their metadata, ordered newest first."""
     global harness
     if harness is None:
-        raise HTTPException(status_code=500, detail="Harness not initialized.")
+        raise HTTPException(status_code=503, detail="Harness not initialized.")
 
     from dataclasses import asdict
     return [asdict(s) for s in harness.sessions.list_sessions()]
@@ -227,7 +227,7 @@ async def create_session(req: CreateSessionRequest) -> dict[str, Any]:
     """Create a new dedicated chat session thread."""
     global harness
     if harness is None:
-        raise HTTPException(status_code=500, detail="Harness not initialized.")
+        raise HTTPException(status_code=503, detail="Harness not initialized.")
 
     from dataclasses import asdict
     session = harness.sessions.create_session(title=req.title, session_id=req.session_id)
@@ -240,7 +240,7 @@ async def get_session_details(thread_id: str) -> dict[str, Any]:
     """Retrieve metadata and checkpointed state/messages for a session."""
     global harness
     if harness is None:
-        raise HTTPException(status_code=500, detail="Harness not initialized.")
+        raise HTTPException(status_code=503, detail="Harness not initialized.")
 
     from dataclasses import asdict
     meta = harness.sessions.get_session(thread_id)
@@ -258,7 +258,7 @@ async def delete_session(thread_id: str) -> dict[str, Any]:
     """Delete a chat session."""
     global harness
     if harness is None:
-        raise HTTPException(status_code=500, detail="Harness not initialized.")
+        raise HTTPException(status_code=503, detail="Harness not initialized.")
 
     deleted = harness.sessions.delete_session(thread_id)
     return {"thread_id": thread_id, "deleted": deleted}
@@ -301,7 +301,7 @@ async def _run_in_background(
 async def start_run(req: RunRequest) -> dict[str, Any]:
     global harness
     if harness is None:
-        raise HTTPException(status_code=500, detail="Harness not initialized.")
+        raise HTTPException(status_code=503, detail="Harness not initialized.")
 
     thread_id = req.thread_id or str(uuid.uuid4())
     if thread_id in active_run_tasks and not active_run_tasks[thread_id].done():
@@ -355,7 +355,7 @@ async def start_run_stream(req: StreamRunRequest) -> StreamingResponse:
     """
     global harness
     if harness is None:
-        raise HTTPException(status_code=500, detail="Harness not initialized.")
+        raise HTTPException(status_code=503, detail="Harness not initialized.")
 
     thread_id = req.thread_id or str(uuid.uuid4())
     harness.sessions.save_message(thread_id, sender="user", text=req.user_request)
@@ -494,7 +494,7 @@ async def stop_run(thread_id: str) -> dict[str, Any]:
 async def get_run_status(thread_id: str) -> dict[str, Any]:
     global harness
     if harness is None:
-        raise HTTPException(status_code=500, detail="Harness not initialized.")
+        raise HTTPException(status_code=503, detail="Harness not initialized.")
 
     active_harness = harness
     state = await active_harness.get_state(thread_id) or {}
@@ -516,7 +516,7 @@ async def get_run_status(thread_id: str) -> dict[str, Any]:
 async def resume_run(thread_id: str, req: ResumeRequest) -> dict[str, Any]:
     global harness
     if harness is None:
-        raise HTTPException(status_code=500, detail="Harness not initialized.")
+        raise HTTPException(status_code=503, detail="Harness not initialized.")
 
     active_harness = harness
     if thread_id in active_run_tasks and not active_run_tasks[thread_id].done():
@@ -567,7 +567,7 @@ async def resume_run(thread_id: str, req: ResumeRequest) -> dict[str, Any]:
 async def stream_run(thread_id: str) -> StreamingResponse:
     global harness
     if harness is None:
-        raise HTTPException(status_code=500, detail="Harness not initialized.")
+        raise HTTPException(status_code=503, detail="Harness not initialized.")
 
     active_harness = harness
     async def event_generator():

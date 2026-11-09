@@ -82,10 +82,16 @@ class MCPClientWrapper:
         stack, self._stack = self._stack, AsyncExitStack()
         try:
             await stack.aclose()
-        except Exception:
-            logger.exception(
-                "Failed to close MCP client resources for %s transport.",
+        except Exception as exc:
+            # Non-fatal: AsyncExitStack.aclose() still exits every registered
+            # context manager even when one __aexit__ raises.  The remaining
+            # resources are released; only the last raised exception bubbles up.
+            logger.warning(
+                "Non-fatal error during MCP %s transport cleanup "
+                "(resources still released): %s: %s",
                 self._transport,
+                type(exc).__name__,
+                exc,
             )
 
     def _make_tool(self, mcp_tool: Any) -> StructuredTool:

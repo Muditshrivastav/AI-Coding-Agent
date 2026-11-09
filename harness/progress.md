@@ -1,7 +1,7 @@
 # Build Progress
 
 ## Current Stage
-`budget_exceeded`
+`partial`
 
 ## Current Task
 none

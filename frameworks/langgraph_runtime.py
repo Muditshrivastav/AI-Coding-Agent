@@ -65,7 +65,12 @@ class LangGraphRuntime:
         session_manager: SessionManager,
         root_dir: str = ".",
     ) -> LangGraphRuntime:
-        """Create a runtime with durable Postgres checkpoints when a DSN is configured."""
+        """Create a runtime with durable Postgres checkpoints when a DSN is configured.
+
+        Falls back to in-memory ``MemorySaver`` when the Postgres checkpoint
+        package is missing or the database is unreachable, so the harness can
+        always start.
+        """
         db_dsn = (
             os.getenv("supabase_uri")
             or os.getenv("SUPABASE_URI")
@@ -76,23 +81,40 @@ class LangGraphRuntime:
             logger.info("No Postgres DSN configured; using in-memory graph checkpoints.")
             return cls(session_manager=session_manager, root_dir=root_dir)
 
-        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-
-        context = AsyncPostgresSaver.from_conn_string(db_dsn)
-        checkpointer = await context.__aenter__()
         try:
-            await checkpointer.setup()
-        except Exception:
-            await context.__aexit__(*sys.exc_info())
-            raise
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-        logger.info("Using durable Postgres graph checkpoints.")
-        return cls(
-            checkpointer=checkpointer,
-            session_manager=session_manager,
-            root_dir=root_dir,
-            checkpointer_context=context,
-        )
+            context = AsyncPostgresSaver.from_conn_string(db_dsn)
+            checkpointer = await context.__aenter__()
+            try:
+                await checkpointer.setup()
+            except BaseException:
+                await context.__aexit__(*sys.exc_info())
+                raise
+
+            logger.info("Using durable Postgres graph checkpoints.")
+            return cls(
+                checkpointer=checkpointer,
+                session_manager=session_manager,
+                root_dir=root_dir,
+                checkpointer_context=context,
+            )
+        except ImportError as exc:
+            logger.warning(
+                "Postgres checkpoint package not installed (%s); "
+                "falling back to in-memory graph checkpoints. "
+                "Install 'langgraph-checkpoint-postgres' for durable state.",
+                exc,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Postgres checkpointer unavailable (%s: %s); "
+                "falling back to in-memory graph checkpoints.",
+                type(exc).__name__,
+                exc,
+            )
+
+        return cls(session_manager=session_manager, root_dir=root_dir)
 
     @property
     def checkpointer(self) -> Any:

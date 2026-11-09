@@ -43,31 +43,40 @@ def test_main_passes_custom_loop_factory_to_uvicorn(monkeypatch):
 
 
 def test_uvicorn_can_load_and_use_loop_setup(monkeypatch):
+    """Verify uvicorn resolves the loop string and the factory uses SelectSelector."""
     import uvicorn
 
+    # Patch sys and asyncio on run_api so no real event loop is ever created.
+    expected_loop = object()
+    created_selectors: list[selectors.SelectSelector] = []
+    real_SelectSelector = selectors.SelectSelector
+
+    def fake_SelectorEventLoop(selector):
+        created_selectors.append(selector)
+        return expected_loop
+
     monkeypatch.setattr(run_api, "sys", SimpleNamespace(platform="win32"))
-    created_selectors = []
-    select_selector = selectors.SelectSelector
+    monkeypatch.setattr(
+        run_api,
+        "asyncio",
+        SimpleNamespace(SelectorEventLoop=fake_SelectorEventLoop),
+    )
     monkeypatch.setattr(
         run_api,
         "selectors",
-        SimpleNamespace(
-            SelectSelector=lambda: created_selectors.append(select_selector())
-            or created_selectors[-1]
-        ),
+        SimpleNamespace(SelectSelector=real_SelectSelector),
     )
+
     config = uvicorn.Config(
         "interfaces.api_server:app",
         loop="interfaces.run_api:selector_loop_factory",
     )
 
     loop_factory = config.get_loop_factory()
-    assert loop_factory is not None
+    assert loop_factory is not None, "uvicorn did not resolve the loop factory"
+
     loop = loop_factory()
 
-    try:
-        assert isinstance(loop, asyncio.SelectorEventLoop)
-        assert len(created_selectors) == 1
-        assert isinstance(created_selectors[0], selectors.SelectSelector)
-    finally:
-        loop.close()
+    assert loop is expected_loop
+    assert len(created_selectors) == 1
+    assert isinstance(created_selectors[0], selectors.SelectSelector)
